@@ -97,3 +97,8 @@ output "cilium_values" {
   description = "Effective (merged) Cilium Helm values rendered into the inline manifest. Includes kubeProxyReplacement=true and k8sServicePort=KubePrism (7445). Not sensitive."
   value       = local.cilium_merged_values
 }
+
+output "labels" {
+  description = "Common labels passed to the module (surfaced for downstream tagging/automation)."
+  value       = var.labels
+}

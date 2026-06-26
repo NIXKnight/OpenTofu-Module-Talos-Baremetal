@@ -10,10 +10,6 @@ terraform {
       source  = "hashicorp/helm"
       version = "~> 3.0"
     }
-    http = {
-      source  = "hashicorp/http"
-      version = "~> 3.4"
-    }
     time = {
       source  = "hashicorp/time"
       version = "~> 0.9"
