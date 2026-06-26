@@ -427,26 +427,49 @@ variable "labels" {
 }
 
 # -------------------------------------------------------------------------------
-# 8. OPTIONAL DISK ENCRYPTION (KMS) - stub for v1
+# 8. OPTIONAL DISK ENCRYPTION (nodeID/uuid default; kms; tpm)
 # -------------------------------------------------------------------------------
 
 variable "disk_encryption" {
   description = <<-EOT
-    Optional system disk encryption via a KMS endpoint (LUKS2). Disabled by default.
-    When enabled, STATE and EPHEMERAL partitions are encrypted with a KMS-held key.
-      { enabled = true, kms_endpoint = "https://kms.example:443", cipher = "aes-xts-plain64", key_size = 4096, block_size = 4096 }
+    Optional system disk encryption (LUKS2) for the STATE and EPHEMERAL partitions on
+    EVERY node. Disabled by default. `key_provider` selects how the LUKS key is derived:
+
+      - "nodeID" (default): key deterministically derived from the node's hardware UUID
+                            (SMBIOS) plus the partition label. No external dependency or
+                            stored secret - the recommended baremetal mechanism. This is
+                            the "uuid" key provider.
+      - "kms"             : key wrapped by a remote KMS endpoint (requires kms_endpoint).
+      - "tpm"             : key sealed to the node's TPM 2.0 device.
+
+    cipher / key_size / block_size are optional LUKS overrides (Talos defaults apply when
+    left unset). NOTE: changing encryption settings on an already-installed node requires
+    a wipe; apply this at initial provisioning. See examples/disk-encryption.
+
+    Example (uuid / nodeID):
+      disk_encryption = { enabled = true, key_provider = "nodeID" }
   EOT
   type = object({
     enabled      = optional(bool, false)
+    key_provider = optional(string, "nodeID")
     kms_endpoint = optional(string)
-    cipher       = optional(string, "aes-xts-plain64")
-    key_size     = optional(number, 4096)
-    block_size   = optional(number, 4096)
+    cipher       = optional(string)
+    key_size     = optional(number)
+    block_size   = optional(number)
   })
   default = {}
 
   validation {
-    condition     = !try(var.disk_encryption.enabled, false) || try(var.disk_encryption.kms_endpoint, null) != null
-    error_message = "disk_encryption.kms_endpoint is required when disk_encryption.enabled is true."
+    condition     = contains(["nodeID", "kms", "tpm"], try(var.disk_encryption.key_provider, "nodeID"))
+    error_message = "disk_encryption.key_provider must be one of: nodeID, kms, tpm."
+  }
+
+  validation {
+    condition = (
+      !try(var.disk_encryption.enabled, false) ||
+      try(var.disk_encryption.key_provider, "nodeID") != "kms" ||
+      try(var.disk_encryption.kms_endpoint, null) != null
+    )
+    error_message = "disk_encryption.kms_endpoint is required when disk_encryption.key_provider is \"kms\"."
   }
 }

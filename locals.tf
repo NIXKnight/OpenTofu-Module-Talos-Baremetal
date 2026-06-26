@@ -78,14 +78,34 @@ locals {
   sysctls_fragment    = length(local.all_sysctls) > 0 ? { sysctls = local.all_sysctls } : {}
   registries_fragment = try(length(var.registries), 0) > 0 ? { registries = var.registries } : {}
 
-  disk_encryption_partition = try(var.disk_encryption.enabled, false) ? {
-    provider  = "luks2"
-    keys      = [{ slot = 0, kms = { endpoint = var.disk_encryption.kms_endpoint } }]
-    cipher    = var.disk_encryption.cipher
-    keySize   = var.disk_encryption.key_size
-    blockSize = var.disk_encryption.block_size
-  } : null
+  # Disk encryption (LUKS2). key_provider selects how the LUKS key is derived
+  # (Talos v1.13 docs: reference/configuration/block encryption keys[]):
+  #   nodeID -> deterministically derived from the node hardware UUID ("uuid"
+  #             mechanism; no stored secret, recommended for baremetal)
+  #   kms    -> sealed/unsealed by a remote KMS endpoint
+  #   tpm    -> sealed to the node TPM 2.0 device
+  disk_encryption_key_provider = try(var.disk_encryption.key_provider, "nodeID")
 
+  # Exactly one provider fragment is non-empty; merged with the slot. Separate
+  # conditional fragments avoid a ternary type-unification error.
+  disk_encryption_key = try(var.disk_encryption.enabled, false) ? merge(
+    { slot = 0 },
+    local.disk_encryption_key_provider == "nodeID" ? { nodeID = {} } : {},
+    local.disk_encryption_key_provider == "tpm" ? { tpm = {} } : {},
+    local.disk_encryption_key_provider == "kms" ? { kms = { endpoint = var.disk_encryption.kms_endpoint } } : {},
+  ) : null
+
+  disk_encryption_partition = try(var.disk_encryption.enabled, false) ? merge(
+    {
+      provider = "luks2"
+      keys     = [local.disk_encryption_key]
+    },
+    try(var.disk_encryption.cipher, null) != null ? { cipher = var.disk_encryption.cipher } : {},
+    try(var.disk_encryption.key_size, null) != null ? { keySize = var.disk_encryption.key_size } : {},
+    try(var.disk_encryption.block_size, null) != null ? { blockSize = var.disk_encryption.block_size } : {},
+  ) : null
+
+  # Encrypt STATE (secrets/certs) and EPHEMERAL (workload data) on every node.
   disk_encryption_config = try(var.disk_encryption.enabled, false) ? {
     state     = local.disk_encryption_partition
     ephemeral = local.disk_encryption_partition

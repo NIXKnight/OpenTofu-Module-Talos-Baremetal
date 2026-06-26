@@ -244,3 +244,91 @@ run "rejects_vip_node_ip_collision" {
 
   expect_failures = [talos_machine_secrets.this]
 }
+
+# -------------------------------------------------------------------------------
+# UUID (nodeID) disk encryption is wired onto STATE+EPHEMERAL of every node.
+# -------------------------------------------------------------------------------
+run "disk_encryption_nodeid" {
+  command = plan
+
+  variables {
+    control_planes = {
+      "cp-1" = { ip = "192.168.30.11" }
+      "cp-2" = { ip = "192.168.30.12" }
+      "cp-3" = { ip = "192.168.30.13" }
+    }
+    workers = {
+      "worker-1" = { ip = "192.168.30.21" }
+    }
+    disk_encryption = {
+      enabled      = true
+      key_provider = "nodeID"
+    }
+  }
+
+  # LUKS2 provider on the control plane STATE partition.
+  assert {
+    condition     = nonsensitive(output.controlplane_config["cp-1"].machine.systemDiskEncryption.state.provider) == "luks2"
+    error_message = "control plane STATE encryption provider must be luks2."
+  }
+
+  # nodeID (uuid) key present on the control plane, and NOT kms/tpm.
+  assert {
+    condition     = nonsensitive(strcontains(yamlencode(output.controlplane_config["cp-1"].machine.systemDiskEncryption), "nodeID"))
+    error_message = "control plane encryption must use the nodeID (uuid) key provider."
+  }
+
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.controlplane_config["cp-1"].machine.systemDiskEncryption), "kms"))
+    error_message = "nodeID encryption must not emit a kms key."
+  }
+
+  # Encryption is machine-level, so workers are encrypted too (EPHEMERAL).
+  assert {
+    condition     = nonsensitive(output.worker_config["worker-1"].machine.systemDiskEncryption.ephemeral.provider) == "luks2"
+    error_message = "worker EPHEMERAL encryption provider must be luks2."
+  }
+
+  assert {
+    condition     = nonsensitive(strcontains(yamlencode(output.worker_config["worker-1"].machine.systemDiskEncryption), "nodeID"))
+    error_message = "worker encryption must use the nodeID (uuid) key provider."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# kms key provider without an endpoint MUST be rejected.
+# -------------------------------------------------------------------------------
+run "rejects_kms_without_endpoint" {
+  command = plan
+
+  variables {
+    control_planes = {
+      "cp-1" = { ip = "192.168.30.11" }
+    }
+    disk_encryption = {
+      enabled      = true
+      key_provider = "kms"
+    }
+  }
+
+  expect_failures = [var.disk_encryption]
+}
+
+# -------------------------------------------------------------------------------
+# An unknown key provider MUST be rejected.
+# -------------------------------------------------------------------------------
+run "rejects_invalid_key_provider" {
+  command = plan
+
+  variables {
+    control_planes = {
+      "cp-1" = { ip = "192.168.30.11" }
+    }
+    disk_encryption = {
+      enabled      = true
+      key_provider = "bogus"
+    }
+  }
+
+  expect_failures = [var.disk_encryption]
+}

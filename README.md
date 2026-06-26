@@ -123,7 +123,8 @@ module "talos" {
 }
 ```
 
-Runnable copies live in [`examples/basic`](examples/basic) and [`examples/ha`](examples/ha).
+Runnable copies live in [`examples/basic`](examples/basic), [`examples/ha`](examples/ha), and
+[`examples/disk-encryption`](examples/disk-encryption) (UUID / `nodeID` LUKS2 encryption).
 
 > Heterogeneous NICs: if a node's VIP interface differs (e.g. `eno1` vs `enp1s0`), set
 > it per node with `control_planes["cp-x"].interface`. Leave `vip_interface` unset to use
@@ -221,7 +222,46 @@ Confirm the Talos ↔ Kubernetes pairing against the
 | `health_check_timeout_seconds` | `number` | `600` | Health check read timeout. |
 | `wait_for_boot_seconds` | `number` | `30` | Settle window after CP apply before bootstrap. |
 | `labels` | `map(string)` | `{}` | Informational labels surfaced via outputs. |
-| `disk_encryption` | `object` | `{ enabled = false }` | Optional LUKS2 system-disk encryption via a KMS endpoint. |
+| `disk_encryption` | `object` | `{ enabled = false }` | Optional LUKS2 STATE+EPHEMERAL encryption. `key_provider` ∈ `nodeID` (uuid, default) / `kms` / `tpm`. See [Disk encryption](#disk-encryption). |
+
+---
+
+## Disk encryption
+
+Optional LUKS2 encryption for the **STATE** (secrets/certs) and **EPHEMERAL** (workload
+data) partitions on **every** node. Disabled by default; enable with
+`disk_encryption.enabled = true`. The `key_provider` chooses how the LUKS key is derived
+(see the Talos v1.13 [disk-encryption docs](https://docs.siderolabs.com/talos/v1.13/configure-your-talos-cluster/storage-and-disk-management/disk-encryption)
+and the [config block reference](https://docs.siderolabs.com/talos/v1.13/reference/configuration/block/rawvolumeconfig)):
+
+| `key_provider` | How the key is derived | Notes |
+|---|---|---|
+| `nodeID` (default) | Deterministically from the node **hardware UUID** (SMBIOS) + partition label | The **"uuid" mechanism**. No stored secret, no external dependency, no TPM. Recommended for baremetal; protects data on drives removed from the node. |
+| `kms` | Sealed/unsealed by a remote KMS endpoint | Requires `disk_encryption.kms_endpoint`. |
+| `tpm` | Sealed to the node **TPM 2.0** device | Requires TPM 2.0 (typically with SecureBoot). |
+
+```hcl
+# UUID (nodeID) encryption — no secrets anywhere:
+disk_encryption = {
+  enabled      = true
+  key_provider = "nodeID"
+  # cipher / key_size / block_size are optional LUKS overrides; Talos defaults apply when unset.
+}
+```
+
+The module renders this as `machine.systemDiskEncryption.{state,ephemeral}` with
+`provider: luks2` and a single `nodeID: {}` / `kms` / `tpm` key in slot 0. A full
+walkthrough is in [`examples/disk-encryption`](examples/disk-encryption).
+
+> **Set encryption at INITIAL provisioning.** The partitions are created encrypted during
+> the maintenance-mode install. Enabling or changing encryption on an already-installed node
+> requires a wipe.
+>
+> **Note (v1.13):** Talos also supports the newer multi-document `VolumeConfig` form
+> (`kind: VolumeConfig`, `name: STATE`/`EPHEMERAL`) for the same `nodeID`/`kms`/`tpm` keys.
+> This module uses the strategic-merge `machine.systemDiskEncryption` form (also valid in
+> v1.13); if you need `VolumeConfig`-managed user volumes, layer those via `inline_manifests`
+> or a separate config document.
 
 ---
 
