@@ -332,3 +332,61 @@ run "rejects_invalid_key_provider" {
 
   expect_failures = [var.disk_encryption]
 }
+
+# -------------------------------------------------------------------------------
+# Bootstrap-critical Cilium keys are enforced and cannot be overridden.
+# -------------------------------------------------------------------------------
+run "cilium_critical_keys_locked" {
+  command = plan
+
+  variables {
+    control_planes = {
+      "cp-1" = { ip = "192.168.30.11" }
+    }
+    cilium_values = {
+      kubeProxyReplacement = false
+      k8sServiceHost       = "evil.example"
+      k8sServicePort       = 9999
+    }
+  }
+
+  assert {
+    condition     = output.cilium_values.kubeProxyReplacement == true
+    error_message = "kubeProxyReplacement must remain true even if a caller sets it false."
+  }
+
+  assert {
+    condition     = output.cilium_values.k8sServiceHost == "localhost"
+    error_message = "k8sServiceHost must remain localhost even if overridden."
+  }
+
+  assert {
+    condition     = output.cilium_values.k8sServicePort == 7445
+    error_message = "k8sServicePort must remain 7445 (KubePrism) even if overridden."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# Single-character cluster_name is accepted; labels are surfaced via output.
+# -------------------------------------------------------------------------------
+run "single_char_name_and_labels_output" {
+  command = plan
+
+  variables {
+    cluster_name = "a"
+    labels       = { env = "test" }
+    control_planes = {
+      "cp-1" = { ip = "192.168.30.11" }
+    }
+  }
+
+  assert {
+    condition     = output.node_count == 1
+    error_message = "single-character cluster_name must be accepted and plan successfully."
+  }
+
+  assert {
+    condition     = output.labels["env"] == "test"
+    error_message = "labels output must surface the provided labels."
+  }
+}

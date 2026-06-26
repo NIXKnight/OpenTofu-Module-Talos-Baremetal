@@ -58,7 +58,10 @@ talos_machine_secrets
    reservation (by MAC) or static configuration — used **both** in maintenance mode **and**
    after install. That IP is what you put in `control_planes[*].ip` / `workers[*].ip`.
 4. **VIP placement.** `control_plane_vip` must sit **inside the control-plane subnet** and
-   **outside any DHCP range**, and must not equal any node IP (enforced by a precondition).
+   **outside any DHCP range**, and must not equal any node IP. Only the node-IP collision is
+   machine-enforced (a precondition); subnet membership, DHCP-range exclusion, and pod/service
+   CIDR non-overlap are **the operator's responsibility** (OpenTofu has no core CIDR-membership
+   function to validate them reliably). The same applies to `pod_cidr`/`service_cidr` not overlapping.
 5. **Tooling.** OpenTofu `>= 1.8.0`. Providers are resolved automatically (see
    [Requirements](#requirements)). Cilium rendering pulls the chart from `helm.cilium.io`
    on the runner at plan time (no cluster contact).
@@ -203,7 +206,7 @@ Confirm the Talos ↔ Kubernetes pairing against the
 | `deploy_cilium` | `bool` | `true` | Install Cilium as bootstrap CNI. `false` = no CNI (BYO). |
 | `cilium_install_method` | `string` | `inline_manifest` | `inline_manifest` or `none`. |
 | `cilium_version` | `string` | `1.19.5` | Cilium Helm chart version. |
-| `cilium_values` | `any` | `{}` | User Helm values, deep-merged over Talos-tuned defaults. |
+| `cilium_values` | `any` | `{}` | User Helm values. **Shallow merge** — top-level keys replace defaults. The kube-proxy-replacement keys (`kubeProxyReplacement`, `k8sServiceHost`, `k8sServicePort`) are **enforced and cannot be overridden**. |
 
 > **kube-proxy is OFF by default.** The module hardcodes `cluster.proxy.disabled = true` and
 > `cluster.network.cni.name = "none"` on the control plane (cluster-wide). When

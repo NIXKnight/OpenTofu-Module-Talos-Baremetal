@@ -188,8 +188,11 @@ locals {
             service    = { disabled = true }
           }
         }
-        extraManifests  = var.extra_manifests
-        inlineManifests = var.inline_manifests
+        extraManifests = var.extra_manifests
+        # inlineManifests are assembled in the Cilium-layer patch
+        # (local.inline_manifests_patches, applied in main.tf) so that user
+        # manifests and the rendered Cilium manifest compose into a SINGLE list
+        # and the helm-rendered value stays out of this pure, assertable local.
       }
     }
   }
@@ -284,20 +287,37 @@ locals {
     }
   }
 
-  # Shallow merge: user-provided top-level keys override module defaults.
-  cilium_merged_values = merge(local.cilium_default_values, var.cilium_values)
+  # Shallow merge: user top-level keys replace module defaults. The three
+  # bootstrap-critical kube-proxy-replacement keys are RE-APPLIED last so they
+  # cannot be overridden (k8sServicePort must stay == machine.features.kubePrism.port).
+  cilium_merged_values = merge(
+    merge(local.cilium_default_values, var.cilium_values),
+    {
+      kubeProxyReplacement = true
+      k8sServiceHost       = "localhost"
+      k8sServicePort       = 7445
+    },
+  )
 
-  # Rendered Cilium manifests injected as a SEPARATE control-plane config patch
-  # (kept out of controlplane_config so that output stays a pure, assertable local).
-  cilium_config_patches = local.cilium_enabled ? [
+  # Rendered Cilium manifest (provider-dependent) as an inlineManifest entry.
+  cilium_inline_manifest = local.cilium_enabled ? [
+    {
+      name     = "cilium"
+      contents = data.helm_template.cilium[0].manifest
+    }
+  ] : []
+
+  # FINAL inlineManifests list = user manifests + Cilium, composed ONCE so that
+  # enabling Cilium can never replace user inline_manifests via Talos list-patch
+  # semantics. Applied as a single control-plane patch in main.tf, and kept out
+  # of controlplane_config so that output stays a pure, assertable local. When
+  # Cilium is disabled, user inline_manifests still apply (Cilium entry is empty).
+  all_inline_manifests = concat(var.inline_manifests, local.cilium_inline_manifest)
+
+  inline_manifests_patches = length(local.all_inline_manifests) > 0 ? [
     yamlencode({
       cluster = {
-        inlineManifests = [
-          {
-            name     = "cilium"
-            contents = data.helm_template.cilium[0].manifest
-          }
-        ]
+        inlineManifests = local.all_inline_manifests
       }
     })
   ] : []

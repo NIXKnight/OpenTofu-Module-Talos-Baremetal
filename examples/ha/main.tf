@@ -39,7 +39,8 @@ module "talos" {
   # Day-2 friendly: stage reboot-requiring changes instead of applying live.
   apply_mode = "staged_if_needing_reboot"
 
-  # Cilium bootstrap CNI with a couple of user value overrides (deep-merged).
+  # Cilium bootstrap CNI with a user value override (shallow merge; top-level keys
+  # replace defaults, kube-proxy-replacement keys are enforced).
   deploy_cilium  = true
   cilium_version = "1.19.5"
   cilium_values = {

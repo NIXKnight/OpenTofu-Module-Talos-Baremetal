@@ -31,6 +31,10 @@ resource "talos_machine_secrets" "this" {
       condition     = length(distinct(concat(values(local.control_plane_ips), values(local.worker_ips)))) == (length(var.control_planes) + length(var.workers))
       error_message = "All node IPs (control planes and workers combined) must be unique."
     }
+    precondition {
+      condition     = length(distinct([for m in local.all_inline_manifests : m.name])) == length(local.all_inline_manifests)
+      error_message = "inline_manifests names must be unique and must not collide with the reserved 'cilium' inline manifest."
+    }
   }
 }
 
@@ -39,8 +43,9 @@ resource "talos_machine_secrets" "this" {
 # -------------------------------------------------------------------------------
 # data.helm_template mimics `helm template`: it renders manifests on the runner
 # and exposes them as a string. kube_version is pinned so rendering needs NO
-# cluster. The output is injected into Talos cluster.inlineManifests via
-# local.cilium_config_patches, so Talos applies Cilium at bootstrap.
+# cluster. The output is concatenated with var.inline_manifests into a single
+# cluster.inlineManifests list (local.inline_manifests_patches) so Talos applies
+# both user manifests and Cilium at bootstrap without one replacing the other.
 data "helm_template" "cilium" {
   count = local.cilium_enabled ? 1 : 0
 
@@ -60,7 +65,7 @@ data "helm_template" "cilium" {
 # -------------------------------------------------------------------------------
 # cluster_endpoint is the VIP (https://<vip>:6443). config_patches layer:
 #   1. base HCL config (yamlencode of local.controlplane_config - includes the VIP)
-#   2. Cilium inline manifest (when enabled)
+#   2. combined inlineManifests (user manifests + Cilium, single list)
 #   3. per-node patches (highest precedence)
 data "talos_machine_configuration" "control_plane" {
   for_each = var.control_planes
@@ -74,7 +79,7 @@ data "talos_machine_configuration" "control_plane" {
 
   config_patches = concat(
     [yamlencode(local.controlplane_config[each.key])],
-    local.cilium_config_patches,
+    local.inline_manifests_patches,
     local.controlplane_extra_patches[each.key],
   )
 
@@ -199,7 +204,12 @@ data "talos_cluster_health" "this" {
     read = "${var.health_check_timeout_seconds}s"
   }
 
-  depends_on = [talos_machine_bootstrap.this]
+  # Wait for bootstrap AND for workers to be applied/rebooted, otherwise the
+  # worker_nodes health check can run before workers have joined.
+  depends_on = [
+    talos_machine_bootstrap.this,
+    talos_machine_configuration_apply.worker,
+  ]
 }
 
 # -------------------------------------------------------------------------------

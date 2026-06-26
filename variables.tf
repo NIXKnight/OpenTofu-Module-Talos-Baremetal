@@ -21,7 +21,7 @@ variable "cluster_name" {
   type        = string
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]*[a-z0-9]$", var.cluster_name)) && length(var.cluster_name) <= 32
+    condition     = can(regex("^[a-z]([a-z0-9-]*[a-z0-9])?$", var.cluster_name)) && length(var.cluster_name) <= 32
     error_message = "cluster_name must be lowercase alphanumeric with hyphens, start with a letter, end with alphanumeric, max 32 chars."
   }
 }
@@ -182,6 +182,11 @@ variable "vip_interface" {
   EOT
   type        = string
   default     = null
+
+  validation {
+    condition     = var.vip_interface == null || length(trimspace(coalesce(var.vip_interface, " "))) > 0
+    error_message = "vip_interface, when set, must be a non-empty interface name."
+  }
 }
 
 variable "vip_interface_dhcp" {
@@ -224,6 +229,11 @@ variable "cluster_domain" {
   description = "Cluster DNS domain."
   type        = string
   default     = "cluster.local"
+
+  validation {
+    condition     = length(trimspace(var.cluster_domain)) > 0
+    error_message = "cluster_domain must not be empty."
+  }
 }
 
 variable "cert_sans" {
@@ -236,6 +246,11 @@ variable "nameservers" {
   description = "DNS nameservers applied to every node."
   type        = list(string)
   default     = ["1.1.1.1", "8.8.8.8"]
+
+  validation {
+    condition     = alltrue([for ns in var.nameservers : length(trimspace(ns)) > 0])
+    error_message = "every nameservers entry must be a non-empty string."
+  }
 }
 
 variable "ntp_servers" {
@@ -252,6 +267,11 @@ variable "install_disk" {
   description = "Default install disk for nodes that do not set a per-node install_disk."
   type        = string
   default     = "/dev/sda"
+
+  validation {
+    condition     = length(trimspace(var.install_disk)) > 0
+    error_message = "install_disk must not be empty."
+  }
 }
 
 variable "apiserver_extra_args" {
@@ -355,7 +375,7 @@ variable "cilium_version" {
 }
 
 variable "cilium_values" {
-  description = "User Helm values for Cilium, deep-merged over the module's Talos-tuned defaults (type 'any')."
+  description = "User Helm values for Cilium (type 'any'). Shallow merge - top-level keys replace defaults. The kube-proxy-replacement keys (kubeProxyReplacement, k8sServiceHost, k8sServicePort) are enforced and cannot be overridden."
   type        = any
   default     = {}
 }
