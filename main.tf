@@ -31,33 +31,7 @@ resource "talos_machine_secrets" "this" {
       condition     = length(distinct(concat(values(local.control_plane_ips), values(local.worker_ips)))) == (length(var.control_planes) + length(var.workers))
       error_message = "All node IPs (control planes and workers combined) must be unique."
     }
-    precondition {
-      condition     = length(distinct([for m in local.all_inline_manifests : m.name])) == length(local.all_inline_manifests)
-      error_message = "inline_manifests names must be unique and must not collide with the reserved 'cilium' inline manifest."
-    }
   }
-}
-
-# -------------------------------------------------------------------------------
-# CILIUM RENDER (template-only - renders the chart locally, never connects)
-# -------------------------------------------------------------------------------
-# data.helm_template mimics `helm template`: it renders manifests on the runner
-# and exposes them as a string. kube_version is pinned so rendering needs NO
-# cluster. The output is concatenated with var.inline_manifests into a single
-# cluster.inlineManifests list (local.inline_manifests_patches) so Talos applies
-# both user manifests and Cilium at bootstrap without one replacing the other.
-data "helm_template" "cilium" {
-  count = local.cilium_enabled ? 1 : 0
-
-  name         = "cilium"
-  namespace    = "kube-system"
-  repository   = "https://helm.cilium.io"
-  chart        = "cilium"
-  version      = var.cilium_version
-  kube_version = var.kubernetes_version
-  include_crds = true
-
-  values = [yamlencode(local.cilium_merged_values)]
 }
 
 # -------------------------------------------------------------------------------
@@ -65,7 +39,7 @@ data "helm_template" "cilium" {
 # -------------------------------------------------------------------------------
 # cluster_endpoint is the VIP (https://<vip>:6443). config_patches layer:
 #   1. base HCL config (yamlencode of local.controlplane_config - includes the VIP)
-#   2. combined inlineManifests (user manifests + Cilium, single list)
+#   2. user inlineManifests (var.inline_manifests; Cilium installs via helm_release)
 #   3. per-node patches (highest precedence)
 data "talos_machine_configuration" "control_plane" {
   for_each = var.control_planes
@@ -189,9 +163,79 @@ resource "talos_machine_bootstrap" "this" {
 }
 
 # -------------------------------------------------------------------------------
-# HEALTH GATE (optional) - run ONLY AFTER bootstrap (avoids pre-bootstrap
-# etcd deadlock, Talos #7967). Gates kubeconfig retrieval.
+# API READINESS POLL - wait for the Kubernetes API to answer after bootstrap
 # -------------------------------------------------------------------------------
+# The helm provider must reach the live API to install Cilium, but bootstrap can
+# return before the apiserver is fully serving. Poll https://<cp>:6443/version on
+# the first real CP IP until it responds. insecure: the API serving cert is not in
+# the runner trust store. Only needed when this module installs Cilium.
+data "http" "api_up" {
+  count = local.cilium_enabled ? 1 : 0
+
+  url      = "https://${local.bootstrap_ip}:6443/version"
+  insecure = true
+
+  retry {
+    attempts = 60
+  }
+
+  depends_on = [talos_machine_bootstrap.this]
+}
+
+# -------------------------------------------------------------------------------
+# KUBECONFIG - admin kubeconfig from the bootstrapped cluster (FIRST REAL CP IP)
+# -------------------------------------------------------------------------------
+# Fetching the kubeconfig is a Talos-API operation and does NOT need a working CNI,
+# so it depends only on bootstrap (plus the API-up poll when Cilium is enabled). It
+# deliberately does NOT wait on talos_cluster_health, which now runs AFTER the CNI
+# (Talos #7967): gating kubeconfig on health would deadlock, because nodes stay
+# NotReady until Cilium is installed.
+resource "talos_cluster_kubeconfig" "this" {
+  node                 = local.bootstrap_ip
+  endpoint             = local.bootstrap_ip
+  client_configuration = talos_machine_secrets.this.client_configuration
+
+  depends_on = [
+    talos_machine_bootstrap.this,
+    data.http.api_up,
+  ]
+}
+
+# -------------------------------------------------------------------------------
+# CILIUM CNI - live Helm install AFTER bootstrap (replaces the inlineManifest path)
+# -------------------------------------------------------------------------------
+# The helm provider (versions.tf) is configured from talos_cluster_kubeconfig.this.
+# Installing Cilium here - not via Talos cluster.inlineManifests - means day-2
+# changes flow through `tofu apply` (helm upgrade). wait=true blocks until the
+# release is healthy; nodes move NotReady -> Ready once the Cilium agents are up.
+resource "helm_release" "cilium" {
+  count = local.cilium_enabled ? 1 : 0
+
+  name             = "cilium"
+  namespace        = "kube-system"
+  create_namespace = false
+  repository       = "https://helm.cilium.io"
+  chart            = "cilium"
+  version          = var.cilium_version
+  values           = [yamlencode(local.cilium_merged_values)]
+  wait             = true
+  timeout          = var.cilium_helm_timeout
+  atomic           = var.cilium_atomic
+
+  depends_on = [
+    talos_cluster_kubeconfig.this,
+    data.http.api_up,
+  ]
+}
+
+# -------------------------------------------------------------------------------
+# HEALTH GATE (optional) - runs AFTER the CNI (Talos #7967 reorder)
+# -------------------------------------------------------------------------------
+# With Cilium delivered by helm_release instead of inlineManifests, nodes stay
+# NotReady until Cilium is applied, so a health check before the CNI would
+# deadlock. It therefore runs after helm_release.cilium, and also waits for workers
+# to be applied/rebooted so the worker_nodes check does not run before they join.
+# When Cilium is disabled (method "none"), set enable_health_check = false.
 data "talos_cluster_health" "this" {
   count = var.enable_health_check ? 1 : 0
 
@@ -204,24 +248,8 @@ data "talos_cluster_health" "this" {
     read = "${var.health_check_timeout_seconds}s"
   }
 
-  # Wait for bootstrap AND for workers to be applied/rebooted, otherwise the
-  # worker_nodes health check can run before workers have joined.
   depends_on = [
-    talos_machine_bootstrap.this,
+    helm_release.cilium,
     talos_machine_configuration_apply.worker,
-  ]
-}
-
-# -------------------------------------------------------------------------------
-# KUBECONFIG - admin kubeconfig from the bootstrapped cluster (FIRST REAL CP IP)
-# -------------------------------------------------------------------------------
-resource "talos_cluster_kubeconfig" "this" {
-  node                 = local.bootstrap_ip
-  endpoint             = local.bootstrap_ip
-  client_configuration = talos_machine_secrets.this.client_configuration
-
-  depends_on = [
-    talos_machine_bootstrap.this,
-    data.talos_cluster_health.this,
   ]
 }

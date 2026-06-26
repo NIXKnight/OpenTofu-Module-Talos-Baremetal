@@ -12,6 +12,17 @@ output "kubeconfig" {
   sensitive   = true
 }
 
+output "kubeconfig_data" {
+  description = "Decoded Kubernetes API connection fields (host + CA/client cert/key) from the admin kubeconfig, so consumers can wire their own kubernetes/helm providers. Sensitive."
+  value = {
+    host                   = talos_cluster_kubeconfig.this.kubernetes_client_configuration.host
+    cluster_ca_certificate = base64decode(talos_cluster_kubeconfig.this.kubernetes_client_configuration.ca_certificate)
+    client_certificate     = base64decode(talos_cluster_kubeconfig.this.kubernetes_client_configuration.client_certificate)
+    client_key             = base64decode(talos_cluster_kubeconfig.this.kubernetes_client_configuration.client_key)
+  }
+  sensitive = true
+}
+
 output "talosconfig" {
   description = "Talos client configuration (talosconfig) for talosctl. Endpoints/nodes are real CP IPs. Sensitive."
   value       = data.talos_client_configuration.this.talos_config
@@ -89,12 +100,12 @@ output "control_plane_count" {
 }
 
 output "cilium_deployed" {
-  description = "Whether Cilium is installed by this module as the bootstrap CNI."
+  description = "Whether Cilium is installed by this module (helm_release) as the cluster CNI."
   value       = local.cilium_enabled
 }
 
 output "cilium_values" {
-  description = "Effective (merged) Cilium Helm values rendered into the inline manifest. Includes kubeProxyReplacement=true and k8sServicePort=KubePrism (7445). Not sensitive."
+  description = "Effective (merged) Cilium Helm values passed to the Cilium helm release. Includes kubeProxyReplacement=true and k8sServicePort=KubePrism (7445). Not sensitive."
   value       = local.cilium_merged_values
 }
 

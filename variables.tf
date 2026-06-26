@@ -353,23 +353,24 @@ variable "deploy_cilium" {
 variable "cilium_install_method" {
   description = <<-EOT
     How Cilium is installed:
-      - "inline_manifest" : render the Cilium Helm chart locally (data.helm_template,
-                            template-only, no cluster connection) and inject the rendered
-                            manifests into Talos cluster.inlineManifests so Talos applies
-                            them at bootstrap.
-      - "none"            : do not install a CNI (bring your own).
+      - "helm_release" : install the Cilium Helm chart as a live release AFTER bootstrap
+                         (helm_release.cilium), using the helm provider this module
+                         configures internally against the cluster kubeconfig. Day-2
+                         changes flow through `tofu apply` (helm upgrade).
+      - "none"         : do not install a CNI (bring your own). Nodes stay NotReady until
+                         you apply a CNI yourself; set enable_health_check = false.
   EOT
   type        = string
-  default     = "inline_manifest"
+  default     = "helm_release"
 
   validation {
-    condition     = contains(["inline_manifest", "none"], var.cilium_install_method)
-    error_message = "cilium_install_method must be one of: inline_manifest, none."
+    condition     = contains(["helm_release", "none"], var.cilium_install_method)
+    error_message = "cilium_install_method must be one of: helm_release, none."
   }
 }
 
 variable "cilium_version" {
-  description = "Cilium Helm chart version (e.g. '1.19.5'). Used only when deploy_cilium is true and method is inline_manifest."
+  description = "Cilium Helm chart version (e.g. '1.19.5'). Used only when deploy_cilium is true and method is helm_release."
   type        = string
   default     = "1.19.5"
 }
@@ -378,6 +379,18 @@ variable "cilium_values" {
   description = "User Helm values for Cilium (type 'any'). Shallow merge - top-level keys replace defaults. The kube-proxy-replacement keys (kubeProxyReplacement, k8sServiceHost, k8sServicePort) are enforced and cannot be overridden."
   type        = any
   default     = {}
+}
+
+variable "cilium_helm_timeout" {
+  description = "Timeout in seconds for the Cilium helm release (helm_release.cilium wait/atomic operations)."
+  type        = number
+  default     = 600
+}
+
+variable "cilium_atomic" {
+  description = "Roll back the Cilium release on a failed install/upgrade (helm_release atomic). When true, the release is purged/rolled back if it does not become healthy within cilium_helm_timeout."
+  type        = bool
+  default     = true
 }
 
 # -------------------------------------------------------------------------------

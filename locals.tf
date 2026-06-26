@@ -3,7 +3,7 @@
 # ===============================================================================
 # Builds the full Talos machine configuration as HCL maps (control plane + worker)
 # which main.tf yamlencode's into config_patches. Also computes endpoints, cert
-# SANs, the Layer-2 VIP interface (control plane only), and the Cilium inline render.
+# SANs, the Layer-2 VIP interface (control plane only), and the Cilium helm values.
 #
 # Critical wiring rule (Talos native VIP relies on etcd, NOT active until AFTER
 # bootstrap):
@@ -189,10 +189,10 @@ locals {
           }
         }
         extraManifests = var.extra_manifests
-        # inlineManifests are assembled in the Cilium-layer patch
-        # (local.inline_manifests_patches, applied in main.tf) so that user
-        # manifests and the rendered Cilium manifest compose into a SINGLE list
-        # and the helm-rendered value stays out of this pure, assertable local.
+        # inlineManifests are applied via a separate patch layer
+        # (local.inline_manifests_patches, in main.tf) carrying only
+        # var.inline_manifests, kept out of this pure, assertable local. Cilium is
+        # no longer an inlineManifest - it installs via helm_release post-bootstrap.
       }
     }
   }
@@ -253,9 +253,9 @@ locals {
   worker_extra_patches       = { for k, w in var.workers : k => w.config_patches }
 
   # -----------------------------------------------------------------------------
-  # Cilium bootstrap CNI (template-only render -> Talos inlineManifests)
+  # Cilium CNI values (fed to helm_release.cilium post-bootstrap in main.tf)
   # -----------------------------------------------------------------------------
-  cilium_enabled = var.deploy_cilium && var.cilium_install_method == "inline_manifest"
+  cilium_enabled = var.deploy_cilium && var.cilium_install_method == "helm_release"
 
   # Talos-required Cilium values. kube-proxy + in-tree CNI are disabled in Talos,
   # so Cilium MUST take over service LB (kubeProxyReplacement) and reach the API
@@ -299,20 +299,12 @@ locals {
     },
   )
 
-  # Rendered Cilium manifest (provider-dependent) as an inlineManifest entry.
-  cilium_inline_manifest = local.cilium_enabled ? [
-    {
-      name     = "cilium"
-      contents = data.helm_template.cilium[0].manifest
-    }
-  ] : []
-
-  # FINAL inlineManifests list = user manifests + Cilium, composed ONCE so that
-  # enabling Cilium can never replace user inline_manifests via Talos list-patch
-  # semantics. Applied as a single control-plane patch in main.tf, and kept out
-  # of controlplane_config so that output stays a pure, assertable local. When
-  # Cilium is disabled, user inline_manifests still apply (Cilium entry is empty).
-  all_inline_manifests = concat(var.inline_manifests, local.cilium_inline_manifest)
+  # User inline manifests only. Cilium is NOT injected here any more - it installs
+  # via helm_release.cilium post-bootstrap (main.tf), so cluster.inlineManifests
+  # carries just what the caller passes in var.inline_manifests. Applied as a single
+  # control-plane patch in main.tf, kept out of controlplane_config so that output
+  # stays a pure, assertable local.
+  all_inline_manifests = var.inline_manifests
 
   inline_manifests_patches = length(local.all_inline_manifests) > 0 ? [
     yamlencode({

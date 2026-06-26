@@ -6,8 +6,24 @@
 # outputs are pure locals, so they are deterministic under mocked providers.
 # ===============================================================================
 
-mock_provider "talos" {}
+mock_provider "talos" {
+  # talos_cluster_kubeconfig.kubernetes_client_configuration feeds the helm
+  # provider and the kubeconfig_data output, both of which base64decode the cert
+  # fields. The default mock generates non-base64 strings, so pin valid base64
+  # here (decodes to foo/bar/baz) to exercise the real decode path.
+  mock_resource "talos_cluster_kubeconfig" {
+    defaults = {
+      kubernetes_client_configuration = {
+        host               = "https://192.168.30.11:6443"
+        ca_certificate     = "Zm9v"
+        client_certificate = "YmFy"
+        client_key         = "YmF6"
+      }
+    }
+  }
+}
 mock_provider "helm" {}
+mock_provider "http" {}
 mock_provider "time" {}
 
 # Common inputs shared by all runs (control_planes / workers set per run).
@@ -181,6 +197,30 @@ run "valid_three_cp_cluster" {
   assert {
     condition     = output.cilium_values.k8sServicePort == nonsensitive(output.controlplane_config["cp-1"].machine.features.kubePrism.port)
     error_message = "Cilium k8sServicePort must equal machine.features.kubePrism.port (both 7445)."
+  }
+
+  # Cilium is delivered by an in-module helm_release (count 1 by default =
+  # helm_release method), NOT via Talos inlineManifests.
+  assert {
+    condition     = length(helm_release.cilium) == 1
+    error_message = "helm_release.cilium must be planned with count 1 when cilium_install_method is helm_release."
+  }
+
+  assert {
+    condition     = helm_release.cilium[0].chart == "cilium"
+    error_message = "helm_release.cilium chart must be 'cilium'."
+  }
+
+  assert {
+    condition     = helm_release.cilium[0].namespace == "kube-system"
+    error_message = "helm_release.cilium namespace must be kube-system."
+  }
+
+  # No 'cilium' inline manifest is produced: the control-plane config patches
+  # carry only the base config (and any user inline_manifests), never Cilium.
+  assert {
+    condition     = !strcontains(join("\n", data.talos_machine_configuration.control_plane["cp-1"].config_patches), "cilium")
+    error_message = "control-plane config_patches must not contain a Cilium inline manifest."
   }
 }
 
@@ -363,6 +403,31 @@ run "cilium_critical_keys_locked" {
   assert {
     condition     = output.cilium_values.k8sServicePort == 7445
     error_message = "k8sServicePort must remain 7445 (KubePrism) even if overridden."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# cilium_install_method = "none" disables the in-module Cilium helm_release
+# (bring-your-own CNI): no helm_release is planned and cilium_deployed is false.
+# -------------------------------------------------------------------------------
+run "cilium_method_none" {
+  command = plan
+
+  variables {
+    cilium_install_method = "none"
+    control_planes = {
+      "cp-1" = { ip = "192.168.30.11" }
+    }
+  }
+
+  assert {
+    condition     = length(helm_release.cilium) == 0
+    error_message = "helm_release.cilium must have count 0 when cilium_install_method is 'none'."
+  }
+
+  assert {
+    condition     = output.cilium_deployed == false
+    error_message = "cilium_deployed must be false when cilium_install_method is 'none'."
   }
 }
 
