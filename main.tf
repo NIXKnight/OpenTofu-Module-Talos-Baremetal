@@ -1,6 +1,6 @@
-#===============================================================================
+# ===============================================================================
 # Talos Baremetal Module - Cluster Bring-up Graph
-#===============================================================================
+# ===============================================================================
 # Order:
 #   secrets
 #     -> machine configuration (control plane + worker, data)
@@ -14,11 +14,11 @@
 # Initial apply targets each node's maintenance-mode IP. That apply installs Talos
 # to disk and the node reboots into the configured state - this IS the documented
 # initial-provisioning flow. No talosctl --insecure shim is required.
-#===============================================================================
+# ===============================================================================
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # MACHINE SECRETS (PKI / tokens / encryption keys - generated at apply)
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 resource "talos_machine_secrets" "this" {
   talos_version = var.talos_version
 
@@ -34,9 +34,9 @@ resource "talos_machine_secrets" "this" {
   }
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # CILIUM RENDER (template-only - renders the chart locally, never connects)
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # data.helm_template mimics `helm template`: it renders manifests on the runner
 # and exposes them as a string. kube_version is pinned so rendering needs NO
 # cluster. The output is injected into Talos cluster.inlineManifests via
@@ -55,9 +55,9 @@ data "helm_template" "cilium" {
   values = [yamlencode(local.cilium_merged_values)]
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # MACHINE CONFIGURATION (data) - control plane
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # cluster_endpoint is the VIP (https://<vip>:6443). config_patches layer:
 #   1. base HCL config (yamlencode of local.controlplane_config - includes the VIP)
 #   2. Cilium inline manifest (when enabled)
@@ -82,9 +82,9 @@ data "talos_machine_configuration" "control_plane" {
   examples = false
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # MACHINE CONFIGURATION (data) - workers (no VIP, no control plane components)
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 data "talos_machine_configuration" "worker" {
   for_each = var.workers
 
@@ -104,9 +104,9 @@ data "talos_machine_configuration" "worker" {
   examples = false
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # CLIENT CONFIGURATION (talosconfig) - REAL CP IPs only (never the VIP)
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 data "talos_client_configuration" "this" {
   cluster_name         = var.cluster_name
   client_configuration = talos_machine_secrets.this.client_configuration
@@ -115,9 +115,9 @@ data "talos_client_configuration" "this" {
   nodes     = concat(values(local.control_plane_ips), values(local.worker_ips))
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # APPLY CONFIG - control planes (targets each node's maintenance-mode IP)
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 resource "talos_machine_configuration_apply" "control_plane" {
   for_each = var.control_planes
 
@@ -137,9 +137,9 @@ resource "talos_machine_configuration_apply" "control_plane" {
   }
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # APPLY CONFIG - workers (after control planes)
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 resource "talos_machine_configuration_apply" "worker" {
   for_each = var.workers
 
@@ -159,17 +159,17 @@ resource "talos_machine_configuration_apply" "worker" {
   depends_on = [talos_machine_configuration_apply.control_plane]
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # SETTLE WINDOW - let nodes install Talos and reboot before bootstrap
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 resource "time_sleep" "wait_for_boot" {
   depends_on      = [talos_machine_configuration_apply.control_plane]
   create_duration = "${var.wait_for_boot_seconds}s"
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # BOOTSTRAP - one-time etcd/control-plane init on the FIRST REAL CP IP
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # Never the VIP: the native L2 VIP relies on etcd leader election and is not
 # active until AFTER bootstrap completes.
 resource "talos_machine_bootstrap" "this" {
@@ -183,10 +183,10 @@ resource "talos_machine_bootstrap" "this" {
   ]
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # HEALTH GATE (optional) - run ONLY AFTER bootstrap (avoids pre-bootstrap
 # etcd deadlock, Talos #7967). Gates kubeconfig retrieval.
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 data "talos_cluster_health" "this" {
   count = var.enable_health_check ? 1 : 0
 
@@ -202,9 +202,9 @@ data "talos_cluster_health" "this" {
   depends_on = [talos_machine_bootstrap.this]
 }
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # KUBECONFIG - admin kubeconfig from the bootstrapped cluster (FIRST REAL CP IP)
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 resource "talos_cluster_kubeconfig" "this" {
   node                 = local.bootstrap_ip
   endpoint             = local.bootstrap_ip

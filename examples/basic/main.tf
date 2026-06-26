@@ -1,12 +1,12 @@
-#===============================================================================
+# ===============================================================================
 # Example: basic - single control plane + single worker
-#===============================================================================
+# ===============================================================================
 # Smallest viable cluster. Nodes 192.168.10.11 (cp) and 192.168.10.21 (worker)
 # must already be booted into Talos maintenance mode and keep these IPs after
 # install. The VIP (192.168.10.10) must be in the same L2 subnet and outside DHCP.
 #
 # This is a single control plane: NOT highly available. Use examples/ha for HA.
-#===============================================================================
+# ===============================================================================
 
 module "talos" {
   source = "../.."

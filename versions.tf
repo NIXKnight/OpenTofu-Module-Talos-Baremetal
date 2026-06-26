@@ -1,6 +1,6 @@
-#===============================================================================
+# ===============================================================================
 # Talos Baremetal Module - Provider Requirements
-#===============================================================================
+# ===============================================================================
 # This module provisions a Talos Linux Kubernetes cluster on PRE-EXISTING
 # baremetal machines. It creates NO compute. Nodes must already be booted into
 # Talos maintenance mode (out-of-band via PXE/USB/ISO) before apply.
@@ -16,7 +16,7 @@
 # required_version is >= 1.8.0 for broad compatibility. The opt-in secret
 # hardening path (client_configuration_wo / machine_configuration_input_wo +
 # ephemeral talos_machine_secrets) documented in README.md requires >= 1.11.
-#===============================================================================
+# ===============================================================================
 
 terraform {
   required_version = ">= 1.8.0"

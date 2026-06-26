@@ -1,6 +1,6 @@
-#===============================================================================
+# ===============================================================================
 # Talos Baremetal Module - Computed Locals
-#===============================================================================
+# ===============================================================================
 # Builds the full Talos machine configuration as HCL maps (control plane + worker)
 # which main.tf yamlencode's into config_patches. Also computes endpoints, cert
 # SANs, the Layer-2 VIP interface (control plane only), and the Cilium inline render.
@@ -12,12 +12,12 @@
 #   - bootstrap / kubeconfig / config-apply / client-configuration ALL target REAL
 #     control-plane node IPs (never the VIP). The default real target is the first
 #     control plane by sort order, overridable via var.bootstrap_node.
-#===============================================================================
+# ===============================================================================
 
 locals {
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Node maps and bootstrap target selection
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   control_plane_ips = { for k, v in var.control_planes : k => v.ip }
   worker_ips        = { for k, v in var.workers : k => v.ip }
 
@@ -28,16 +28,16 @@ locals {
   # client-configuration endpoints/nodes. NEVER the VIP.
   bootstrap_ip = var.control_planes[local.first_cp_key].ip
 
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Endpoints
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # The Kubernetes API endpoint baked into every machine config. Uses the VIP so
   # all nodes (and external clients) reach a single, etcd-elected API address.
   cluster_endpoint = "https://${var.control_plane_vip}:6443"
 
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Certificate SANs (VIP + all CP IPs + standard names + user extras)
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   cert_sans = distinct(compact(concat(
     [var.control_plane_vip],
     values(local.control_plane_ips),
@@ -52,9 +52,9 @@ locals {
     var.cert_sans,
   )))
 
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Shared machine fragments
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   talos_installer_image = "ghcr.io/siderolabs/installer:${var.talos_version}"
 
   # machine.features - KubePrism (local API proxy on :7445) is required so Cilium
@@ -100,9 +100,9 @@ locals {
     local.disk_encryption_fragment,
   )
 
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Control plane VIP interface (CONTROL PLANE ONLY - inline Talos L2 VIP)
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Per-node interface override (control_planes[*].interface) > var.vip_interface.
   # When neither is set, fall back to a physical-interface deviceSelector.
   cp_vip_iface_name = { for k, cp in var.control_planes : k => try(coalesce(cp.interface, var.vip_interface), null) }
@@ -120,9 +120,9 @@ locals {
     )
   }
 
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Control plane machine configuration (HCL map -> yamlencode in main.tf)
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   controlplane_config = {
     for key, cp in var.control_planes : key => {
       machine = merge(
@@ -174,10 +174,10 @@ locals {
     }
   }
 
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Worker machine configuration (HCL map -> yamlencode in main.tf)
   # No VIP, no etcd/apiServer/controllerManager/scheduler.
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   worker_config = {
     for key, w in var.workers : key => {
       machine = merge(
@@ -220,15 +220,15 @@ locals {
     }
   }
 
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Per-node extra config patches (applied last = highest precedence)
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   controlplane_extra_patches = { for k, cp in var.control_planes : k => cp.config_patches }
   worker_extra_patches       = { for k, w in var.workers : k => w.config_patches }
 
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   # Cilium bootstrap CNI (template-only render -> Talos inlineManifests)
-  #-----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
   cilium_enabled = var.deploy_cilium && var.cilium_install_method == "inline_manifest"
 
   # Talos-required Cilium values. kube-proxy + in-tree CNI are disabled in Talos,
