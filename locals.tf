@@ -208,14 +208,17 @@ locals {
         },
         local.machine_optional,
       )
+      # Worker cluster section is intentionally minimal. dnsDomain / podSubnets /
+      # serviceSubnets are kept so a custom cluster_domain or pod/service CIDR
+      # propagates to the worker kubelet (cluster DNS). CNI (cluster.network.cni)
+      # and kube-proxy (cluster.proxy) are cluster-wide, CONTROL-PLANE-only
+      # settings - they are deliberately NOT set on workers.
       cluster = {
         network = {
           dnsDomain      = var.cluster_domain
           podSubnets     = [var.pod_cidr]
           serviceSubnets = [var.service_cidr]
-          cni            = { name = "none" }
         }
-        proxy = { disabled = true }
       }
     }
   }

@@ -108,6 +108,24 @@ run "valid_three_cp_cluster" {
     error_message = "worker_config must not contain a VIP."
   }
 
+  # KubePrism is machine-level and MUST be present on workers too.
+  assert {
+    condition     = nonsensitive(output.worker_config["worker-1"].machine.features.kubePrism.port) == 7445
+    error_message = "worker machine.features.kubePrism.port must be 7445."
+  }
+
+  # Workers must NOT carry control-plane-only kube-proxy settings.
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.worker_config), "proxy:"))
+    error_message = "worker_config must not contain cluster.proxy (control-plane-only)."
+  }
+
+  # Workers must NOT carry control-plane-only CNI settings.
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.worker_config), "cni:"))
+    error_message = "worker_config must not contain cluster.network.cni (control-plane-only)."
+  }
+
   # Node count = 3 control planes + 2 workers.
   assert {
     condition     = output.node_count == 5
@@ -134,6 +152,35 @@ run "valid_three_cp_cluster" {
   assert {
     condition     = output.cilium_deployed == true
     error_message = "cilium_deployed must be true by default."
+  }
+
+  # Cilium kube-proxy replacement: boolean true (NOT the deprecated "strict").
+  assert {
+    condition     = output.cilium_values.kubeProxyReplacement == true
+    error_message = "Cilium kubeProxyReplacement must be boolean true."
+  }
+
+  # Cilium reaches the API via Talos KubePrism on localhost:7445.
+  assert {
+    condition     = output.cilium_values.k8sServiceHost == "localhost"
+    error_message = "Cilium k8sServiceHost must be localhost (KubePrism)."
+  }
+
+  assert {
+    condition     = output.cilium_values.k8sServicePort == 7445
+    error_message = "Cilium k8sServicePort must be 7445 (KubePrism)."
+  }
+
+  # Talos assigns PodCIDRs to Node objects -> Kubernetes host-scope IPAM.
+  assert {
+    condition     = output.cilium_values.ipam.mode == "kubernetes"
+    error_message = "Cilium ipam.mode must be kubernetes."
+  }
+
+  # CRITICAL consistency: Cilium k8sServicePort MUST equal KubePrism port.
+  assert {
+    condition     = output.cilium_values.k8sServicePort == nonsensitive(output.controlplane_config["cp-1"].machine.features.kubePrism.port)
+    error_message = "Cilium k8sServicePort must equal machine.features.kubePrism.port (both 7445)."
   }
 }
 

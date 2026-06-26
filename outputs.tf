@@ -92,3 +92,8 @@ output "cilium_deployed" {
   description = "Whether Cilium is installed by this module as the bootstrap CNI."
   value       = local.cilium_enabled
 }
+
+output "cilium_values" {
+  description = "Effective (merged) Cilium Helm values rendered into the inline manifest. Includes kubeProxyReplacement=true and k8sServicePort=KubePrism (7445). Not sensitive."
+  value       = local.cilium_merged_values
+}

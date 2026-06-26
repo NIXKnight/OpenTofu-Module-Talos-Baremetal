@@ -204,6 +204,14 @@ Confirm the Talos ↔ Kubernetes pairing against the
 | `cilium_version` | `string` | `1.19.5` | Cilium Helm chart version. |
 | `cilium_values` | `any` | `{}` | User Helm values, deep-merged over Talos-tuned defaults. |
 
+> **kube-proxy is OFF by default.** The module hardcodes `cluster.proxy.disabled = true` and
+> `cluster.network.cni.name = "none"` on the control plane (cluster-wide). When
+> `deploy_cilium = true`, Cilium takes over with `kubeProxyReplacement = true` reaching the API
+> via KubePrism (`localhost:7445`). **When `deploy_cilium = false` (BYO CNI), kube-proxy stays
+> disabled** — your replacement CNI MUST provide service load-balancing itself (e.g. Cilium/Calico
+> kube-proxy replacement), or you must re-enable kube-proxy via a `config_patch`
+> (`cluster.proxy.disabled = false`). The module never ships kube-proxy on any default path.
+
 ### Operations / security
 
 | Name | Type | Default | Description |
