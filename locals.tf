@@ -31,12 +31,17 @@ locals {
   # -----------------------------------------------------------------------------
   # Endpoints
   # -----------------------------------------------------------------------------
-  # The Kubernetes API endpoint baked into every machine config. Uses the VIP so
-  # all nodes (and external clients) reach a single, etcd-elected API address.
-  cluster_endpoint = "https://${var.control_plane_vip}:6443"
+  # The Kubernetes API endpoint baked into every machine config (and the kubeconfig).
+  # Defaults to the VIP IP so all nodes (and external clients) reach a single,
+  # etcd-elected API address. When var.api_endpoint_host is set, the endpoint becomes
+  # that DNS name (which MUST resolve to the VIP); the VIP itself stays an IP. This is
+  # only the machine-config endpoint - bootstrap/kubeconfig/apply still target real CP IPs.
+  cluster_endpoint = "https://${coalesce(var.api_endpoint_host, var.control_plane_vip)}:6443"
 
   # -----------------------------------------------------------------------------
-  # Certificate SANs (VIP + all CP IPs + standard names + user extras)
+  # Control-plane / apiserver certificate SANs (VIP + all CP IPs + standard names +
+  # the DNS endpoint host + user extras). Feeds machine.certSANs and apiServer.certSANs
+  # on control planes. Workers use a narrower, node-scoped set (see worker_config).
   # -----------------------------------------------------------------------------
   cert_sans = distinct(compact(concat(
     [var.control_plane_vip],
@@ -50,12 +55,25 @@ locals {
       "kubernetes.default.svc.${var.cluster_domain}",
     ],
     var.cert_sans,
+    # null breaks concat before compact runs, so wrap as [] / [host] (not a bare null).
+    var.api_endpoint_host == null ? [] : [var.api_endpoint_host],
   )))
 
   # -----------------------------------------------------------------------------
   # Shared machine fragments
   # -----------------------------------------------------------------------------
   talos_installer_image = "ghcr.io/siderolabs/installer:${var.talos_version}"
+
+  # Talos >= 1.13 supports multi-document network config: the config generator emits a
+  # default HostnameConfig{auto: stable} document, which conflicts with a v1alpha1
+  # machine.network.hostname ("static hostname is already set in v1alpha1 config"). On
+  # >= 1.13 we set the hostname via a HostnameConfig document (cp/worker_hostname_patches);
+  # on <= 1.12 the generator uses the legacy machine.features.stableHostname path, so the
+  # v1alpha1 hostname is correct there (and HostnameConfig is an unknown kind pre-1.13).
+  # talos_version is validated as vX.Y.Z (variables.tf), so split always yields 3 parts.
+  talos_version_major     = tonumber(split(".", trimprefix(var.talos_version, "v"))[0])
+  talos_version_minor     = tonumber(split(".", trimprefix(var.talos_version, "v"))[1])
+  talos_multidoc_hostname = local.talos_version_major > 1 || (local.talos_version_major == 1 && local.talos_version_minor >= 13)
 
   # machine.features - KubePrism (local API proxy on :7445) is required so Cilium
   # can reach the API via k8sServiceHost=localhost without a working CNI/VIP yet.
@@ -152,17 +170,26 @@ locals {
             image = local.talos_installer_image
           }
           certSANs = local.cert_sans
-          network = {
-            hostname    = coalesce(cp.hostname, key)
-            nameservers = var.nameservers
-            interfaces  = [local.control_plane_vip_interfaces[key]]
-          }
+          network = merge(
+            {
+              nameservers = var.nameservers
+              interfaces  = [local.control_plane_vip_interfaces[key]]
+            },
+            # >= 1.13: hostname set via a HostnameConfig doc (cp_hostname_patches), NOT
+            # v1alpha1. <= 1.12: keep the legacy v1alpha1 machine.network.hostname.
+            local.talos_multidoc_hostname ? {} : { hostname = coalesce(cp.hostname, key) }
+          )
           kubelet = {
             extraArgs = var.kubelet_extra_args
           }
           features = local.machine_features
           time     = { servers = var.ntp_servers }
         },
+        # Per-node Kubernetes labels/annotations via Talos-native machine.nodeLabels /
+        # machine.nodeAnnotations (reconciled day-2). Emitted only when non-empty - the
+        # same conditional-merge idiom as machine_optional, applied per node.
+        length(cp.labels) > 0 ? { nodeLabels = cp.labels } : {},
+        length(cp.annotations) > 0 ? { nodeAnnotations = cp.annotations } : {},
         local.machine_optional,
       )
       cluster = {
@@ -209,16 +236,23 @@ locals {
             disk  = coalesce(w.install_disk, var.install_disk)
             image = local.talos_installer_image
           }
-          network = {
-            hostname    = coalesce(w.hostname, key)
-            nameservers = var.nameservers
-          }
+          # Node-scoped Talos cert SANs: the worker's own hostname + IP, plus any operator
+          # cert_sans and the DNS endpoint host (api_endpoint_host). Deliberately NOT
+          # local.cert_sans, which carries apiserver identities (the VIP, CP IPs,
+          # kubernetes.default.svc) that do not belong on a worker certificate.
+          certSANs = distinct(compact(concat(
+            [coalesce(w.hostname, key), w.ip],
+            var.cert_sans,
+            var.api_endpoint_host == null ? [] : [var.api_endpoint_host],
+          )))
+          network = merge(
+            { nameservers = var.nameservers },
+            # >= 1.13: hostname via worker_hostname_patches; <= 1.12: legacy v1alpha1.
+            local.talos_multidoc_hostname ? {} : { hostname = coalesce(w.hostname, key) }
+          )
           kubelet = merge(
             {
-              extraArgs = merge(
-                var.kubelet_extra_args,
-                length(w.labels) > 0 ? { "node-labels" = join(",", [for lk, lv in w.labels : "${lk}=${lv}"]) } : {},
-              )
+              extraArgs = var.kubelet_extra_args
             },
             length(w.taints) > 0 ? {
               extraConfig = {
@@ -229,6 +263,12 @@ locals {
           features = local.machine_features
           time     = { servers = var.ntp_servers }
         },
+        # Per-node Kubernetes labels/annotations via Talos-native machine.nodeLabels /
+        # machine.nodeAnnotations (reconciled day-2). This REPLACES the old kubelet
+        # --node-labels path; worker labels no longer flow through kubelet.extraArgs.
+        # Emitted only when non-empty.
+        length(w.labels) > 0 ? { nodeLabels = w.labels } : {},
+        length(w.annotations) > 0 ? { nodeAnnotations = w.annotations } : {},
         local.machine_optional,
       )
       # Worker cluster section is intentionally minimal. dnsDomain / podSubnets /
@@ -251,6 +291,31 @@ locals {
   # -----------------------------------------------------------------------------
   controlplane_extra_patches = { for k, cp in var.control_planes : k => cp.config_patches }
   worker_extra_patches       = { for k, w in var.workers : k => w.config_patches }
+
+  # -----------------------------------------------------------------------------
+  # Per-node hostname as a Talos >= 1.13 HostnameConfig document (empty list on
+  # <= 1.12, where the v1alpha1 machine.network.hostname is used instead).
+  # -----------------------------------------------------------------------------
+  # auto:"off" overrides the generator's default HostnameConfig{auto: stable} on the
+  # same-(apiVersion,kind) document strategic merge (the patch's explicitly-set pointer
+  # wins, even though Off is the zero enum value); the static `hostname` (highest
+  # priority) becomes the node name. Yields a valid HostnameConfig{auto: off, hostname}.
+  cp_hostname_patches = {
+    for key, cp in var.control_planes : key => local.talos_multidoc_hostname ? [yamlencode({
+      apiVersion = "v1alpha1"
+      kind       = "HostnameConfig"
+      auto       = "off"
+      hostname   = coalesce(cp.hostname, key)
+    })] : []
+  }
+  worker_hostname_patches = {
+    for key, w in var.workers : key => local.talos_multidoc_hostname ? [yamlencode({
+      apiVersion = "v1alpha1"
+      kind       = "HostnameConfig"
+      auto       = "off"
+      hostname   = coalesce(w.hostname, key)
+    })] : []
+  }
 
   # -----------------------------------------------------------------------------
   # Cilium CNI values (fed to helm_release.cilium post-bootstrap in main.tf)

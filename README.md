@@ -23,7 +23,7 @@ The native VIP relies on **etcd leader election** and is **not active until AFTE
 
 ```
 talos_machine_secrets
-  → data.talos_machine_configuration.control_plane / .worker   (cluster_endpoint = https://<vip>:6443)
+  → data.talos_machine_configuration.control_plane / .worker   (cluster_endpoint = https://<vip-or-api_endpoint_host>:6443)
   → data.talos_client_configuration                            (endpoints/nodes = REAL CP IPs)
   → talos_machine_configuration_apply.control_plane            (node/endpoint = each CP IP, maintenance mode)
   → talos_machine_configuration_apply.worker                   (after control planes)
@@ -138,14 +138,14 @@ Default versions in the examples: Talos `v1.13.5`, Kubernetes `1.36.2`, Cilium c
 | `cluster_name` | `string` | Cluster name (lowercase, `[a-z0-9-]`, ≤32). |
 | `talos_version` | `string` | Talos version, `vX.Y.Z` (e.g. `v1.13.5`). |
 | `kubernetes_version` | `string` | Kubernetes version, `X.Y.Z` (no `v`). |
-| `control_planes` | `map(object)` | Control plane inventory; **count must be 1, 3, or 5** (etcd quorum). Fields: `ip` (required), `install_disk?`, `hostname?`, `interface?`, `config_patches?`. |
+| `control_planes` | `map(object)` | Control plane inventory; **count must be 1, 3, or 5** (etcd quorum). Fields: `ip` (required), `install_disk?`, `hostname?`, `interface?`, `labels?`, `annotations?`, `config_patches?`. |
 | `control_plane_vip` | `string` | API VIP (in-subnet, outside DHCP, not a node IP). |
 
 ### Node / VIP options
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `workers` | `map(object)` | `{}` | Worker inventory. Fields: `ip` (required), `install_disk?`, `hostname?`, `labels?`, `taints?`, `config_patches?`. |
+| `workers` | `map(object)` | `{}` | Worker inventory. Fields: `ip` (required), `install_disk?`, `hostname?`, `labels?`, `annotations?`, `taints?`, `config_patches?`. `labels`/`annotations` are delivered via Talos `machine.nodeLabels`/`nodeAnnotations` — see [Node labels and annotations](#node-labels-and-annotations). |
 | `vip_interface` | `string` | `null` | Default NIC hosting the VIP. `null` → physical-interface `deviceSelector`. |
 | `vip_interface_dhcp` | `bool` | `true` | Whether the VIP interface uses DHCP. Set `false` for static nodes and supply addressing via `config_patches`. |
 | `bootstrap_node` | `string` | `null` | Control-plane key to bootstrap / fetch kubeconfig from. Defaults to first by sort order. |
@@ -157,7 +157,8 @@ Default versions in the examples: Talos `v1.13.5`, Kubernetes `1.36.2`, Cilium c
 | `pod_cidr` | `string` | `10.244.0.0/16` | Pod CIDR. |
 | `service_cidr` | `string` | `10.96.0.0/12` | Service CIDR. |
 | `cluster_domain` | `string` | `cluster.local` | Cluster DNS domain. |
-| `cert_sans` | `list(string)` | `[]` | Extra cert SANs (VIP + CP IPs + standard names added automatically). |
+| `api_endpoint_host` | `string` | `null` | Optional DNS hostname for the API endpoint, baked into every machine config + the kubeconfig. **Must resolve to `control_plane_vip`** (the VIP stays an IP). Validated as a bare RFC 1123 hostname. See [API endpoint and certificate SANs](#api-endpoint-and-certificate-sans). |
+| `cert_sans` | `list(string)` | `[]` | Extra cert SANs added to the control-plane `machine.certSANs` + `apiServer.certSANs` (and each worker's node-scoped `machine.certSANs`). VIP, all CP IPs, `api_endpoint_host`, and standard `kubernetes.*` names are added automatically. See [API endpoint and certificate SANs](#api-endpoint-and-certificate-sans). |
 | `nameservers` | `list(string)` | `["1.1.1.1","8.8.8.8"]` | DNS servers. |
 | `ntp_servers` | `list(string)` | `["pool.ntp.org"]` | NTP servers. |
 
@@ -295,6 +296,77 @@ Enabling the approver injects `machine.features.kubernetesTalosAPIAccess` into t
 
 ---
 
+## Node labels and annotations
+
+Attach Kubernetes **node labels** and **annotations** per node on **both roles** via Talos-native `machine.nodeLabels` / `machine.nodeAnnotations`. Talos reconciles these **day-2**: editing `labels`/`annotations` and re-applying updates the Node object (no kubelet flag, no re-registration). Labels are what `nodeSelector` / `nodeAffinity` key on; annotations are free-form metadata and do **not** affect scheduling.
+
+```hcl
+control_planes = {
+  "cp-1" = {
+    ip     = "192.168.20.11"
+    labels = { "node.example.com/role" = "primary" }
+  }
+}
+
+workers = {
+  "worker-1" = {
+    ip          = "192.168.20.21"
+    labels      = { "hardware.example.com/cpu" = "n100" } # tag the mini-PC's processor
+    annotations = { "example.com/rack" = "rack-1" }
+  }
+  "worker-2" = {
+    ip     = "192.168.20.22"
+    labels = { "hardware.example.com/cpu" = "n305" }
+  }
+}
+```
+
+Schedule onto a labelled node with a `nodeSelector` (or `nodeAffinity`):
+
+```yaml
+# Pod / Deployment template spec:
+spec:
+  nodeSelector:
+    hardware.example.com/cpu: n100
+```
+
+> **Worker labels changed mechanism (one-time diff).** Earlier versions delivered worker `labels` via the kubelet `--node-labels` flag (`kubelet.extraArgs.node-labels`). They now use `machine.nodeLabels`, the same path as control planes. **On the next `apply` to an existing cluster you will see a one-time worker config diff** — the `kubelet.extraArgs.node-labels` key disappears and `machine.nodeLabels` appears — plus a **kubelet restart**, and a brief reconcile window before Talos re-asserts the labels through the new path. **Apply during a maintenance window**, then confirm labels persisted: `kubectl get node <worker> --show-labels`. The label *values* are unchanged; you gain day-2 reconcile (and `$patch: delete` to remove a label) and annotations.
+
+> **Reserved label keys are admission-restricted.** Custom, unprefixed keys (e.g. `hardware.example.com/cpu`, `workload`) — the common case — are unaffected. Keys under reserved prefixes such as `*.kubernetes.io/` and `*.k8s.io/` (and especially `node-restriction.kubernetes.io/`) are governed by the **NodeRestriction** admission plugin and may be **rejected or ignored** when applied from a node identity. This is **key/prefix-specific**, not a blanket allow/deny — do **not** assume parity with arbitrary `--node-labels` values. If you must set a reserved-prefix key, verify it lands on your live cluster (`kubectl get node <n> --show-labels`) before relying on it.
+
+---
+
+## API endpoint and certificate SANs
+
+By default the Kubernetes API endpoint baked into every machine config (and the generated kubeconfig) is the **VIP IP**: `https://<control_plane_vip>:6443`. Two knobs let you reach and trust the API by name.
+
+### `cert_sans` — extra SANs (reach the API by hostname)
+
+`cert_sans` adds entries to the control-plane `machine.certSANs` **and** `apiServer.certSANs`, so the API serving certificate validates for those names/IPs. The VIP, all control-plane IPs, `api_endpoint_host` (when set), and the standard `kubernetes.*` names are added automatically — list only your **extra** names/IPs (e.g. an external LB VIP, a management hostname). This makes the cert *valid* for a name; it does not change which address the endpoint points at (that is `api_endpoint_host`).
+
+```hcl
+cert_sans = ["api.lab.example.com", "10.0.0.50"]
+```
+
+### `api_endpoint_host` — a DNS endpoint layered on the VIP
+
+Set `api_endpoint_host` to bake a **DNS name** (instead of the VIP IP) into `cluster.controlPlane.endpoint` on every node and into the kubeconfig `server` field; the host is auto-added to the cert SANs so TLS validates. The VIP **stays an IP** (the Talos native Layer-2 VIP requires `vip.ip`), and the endpoint name is the **only** thing that changes — bootstrap, kubeconfig retrieval, config-apply, and the health gate still target **real control-plane IPs**, never the name.
+
+```hcl
+control_plane_vip = "192.168.20.10"          # stays an IP
+api_endpoint_host = "api.lab-ha.example.com" # A record → 192.168.20.10
+```
+
+- **It MUST resolve to `control_plane_vip`.** Create an A record for the name pointing at the VIP. The module does not manage DNS.
+- **Validation.** Must be a bare RFC 1123 hostname — a scheme (`https://`), a port (`:6443`), a path, or the empty string are rejected at plan time.
+- **DNS-failure caveat.** Because every node and client reaches the API via this name, **if it fails to resolve at runtime, all client/node API access through the endpoint is blocked until DNS recovers.** Keep the record highly available, or omit `api_endpoint_host` and use the VIP IP directly if you do not run reliable internal DNS.
+
+### Worker certificate SANs (node-scoped)
+
+Each worker's Talos `machine.certSANs` is **node-scoped**: the worker's own hostname and IP, plus your `cert_sans` and `api_endpoint_host` (when set). It deliberately does **not** include the apiserver identity set (the VIP, control-plane IPs, `kubernetes.default.svc`) that lands on control-plane certs — those identities do not belong on a worker certificate.
+
+---
+
 ## Outputs
 
 | Name | Sensitive | Description |
@@ -309,7 +381,7 @@ Enabling the approver injects `machine.features.kubernetesTalosAPIAccess` into t
 | `control_plane_ips` | | Map of CP name → IP. |
 | `worker_ips` | | Map of worker name → IP. |
 | `control_plane_vip` | | The API VIP. |
-| `api_endpoint` | | `https://<vip>:6443`. |
+| `api_endpoint` | | `https://<vip-or-api_endpoint_host>:6443` — the VIP IP by default, or `api_endpoint_host` when set. |
 | `bootstrap_endpoint_ip` | | Real CP IP used for bootstrap/kubeconfig (never the VIP). |
 | `node_count` | | Control planes + workers. |
 | `control_plane_count` | | Control plane count. |
@@ -361,7 +433,7 @@ CI covers `fmt`, `init`, `validate`, and a fully-mocked `tofu test`. A real appl
 
 1. **Image nodes.** Boot every target machine into Talos **maintenance mode** (matching `talos_version`) via PXE/USB/ISO. Confirm each answers the Talos API: `talosctl -n <node-ip> --insecure version` (the `--insecure` here is talosctl's, used only for this out-of-band check — the module itself does not need it).
 2. **Reserve addressing.** DHCP-reserve or statically assign each node IP; choose a `control_plane_vip` in-subnet and outside DHCP.
-3. **Plan.** `tofu plan` and confirm: `cluster_endpoint` is `https://<vip>:6443`; apply / bootstrap / kubeconfig target real CP IPs; CNI is `none`; kube-proxy disabled.
+3. **Plan.** `tofu plan` and confirm: `cluster_endpoint` is `https://<vip>:6443` (or `https://<api_endpoint_host>:6443` when `api_endpoint_host` is set); apply / bootstrap / kubeconfig target real CP IPs; CNI is `none`; kube-proxy disabled.
 4. **Apply.** `tofu apply`. Nodes install Talos and reboot into the configured state; the first control plane is bootstrapped; the health gate waits for the API.
 5. **Talos health.** `talosctl --talosconfig <(tofu output -raw talosconfig) -n <cp-ip> health`.
 6. **Kubernetes.** `tofu output -raw kubeconfig > kubeconfig && KUBECONFIG=kubeconfig kubectl get nodes -o wide` — nodes go `Ready` once Cilium is up. `kubectl -n kube-system get pods` shows `cilium*`.

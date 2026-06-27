@@ -684,3 +684,303 @@ run "rejects_external_kubelet" {
 
   expect_failures = [var.kubelet_extra_args]
 }
+
+# -------------------------------------------------------------------------------
+# Talos >= 1.13 (default v1.13.5): the hostname is delivered as a HostnameConfig
+# document, NOT v1alpha1 machine.network.hostname - avoids the generator's default
+# HostnameConfig{auto:stable} conflict ("static hostname is already set in v1alpha1").
+# -------------------------------------------------------------------------------
+run "hostname_via_hostnameconfig_on_1_13" {
+  command = plan
+
+  variables {
+    control_planes = { "cp-1" = { ip = "192.168.30.11", hostname = "cp-one" } }
+    workers        = { "worker-1" = { ip = "192.168.30.21", hostname = "wk-one" } }
+  }
+
+  # CP: a HostnameConfig document patch carrying the node hostname is present.
+  assert {
+    condition     = strcontains(join("\n", data.talos_machine_configuration.control_plane["cp-1"].config_patches), "HostnameConfig")
+    error_message = "CP config_patches must carry a HostnameConfig document on Talos >= 1.13."
+  }
+  assert {
+    condition     = strcontains(join("\n", data.talos_machine_configuration.control_plane["cp-1"].config_patches), "cp-one")
+    error_message = "the HostnameConfig document must carry the CP hostname."
+  }
+  # CP: NO v1alpha1 machine.network.hostname leak.
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.controlplane_config["cp-1"].machine.network), "hostname"))
+    error_message = "v1alpha1 machine.network.hostname must NOT be set on Talos >= 1.13."
+  }
+  # Worker: same treatment.
+  assert {
+    condition     = strcontains(join("\n", data.talos_machine_configuration.worker["worker-1"].config_patches), "HostnameConfig")
+    error_message = "worker config_patches must carry a HostnameConfig document on Talos >= 1.13."
+  }
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.worker_config["worker-1"].machine.network), "hostname"))
+    error_message = "v1alpha1 worker machine.network.hostname must NOT be set on Talos >= 1.13."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# Talos <= 1.12: legacy path - v1alpha1 machine.network.hostname is set and NO
+# HostnameConfig document is emitted (it is an unknown kind pre-1.13, and the
+# generator there uses machine.features.stableHostname so there is no conflict).
+# -------------------------------------------------------------------------------
+run "hostname_via_v1alpha1_on_1_12" {
+  command = plan
+
+  variables {
+    talos_version  = "v1.12.5"
+    control_planes = { "cp-1" = { ip = "192.168.30.11", hostname = "cp-one" } }
+  }
+
+  assert {
+    condition     = nonsensitive(output.controlplane_config["cp-1"].machine.network.hostname) == "cp-one"
+    error_message = "v1alpha1 machine.network.hostname must be set on Talos < 1.13."
+  }
+  assert {
+    condition     = !strcontains(join("\n", data.talos_machine_configuration.control_plane["cp-1"].config_patches), "HostnameConfig")
+    error_message = "no HostnameConfig document may be emitted on Talos < 1.13 (unknown kind)."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# Per-node labels + annotations on BOTH roles via Talos-native machine.nodeLabels /
+# machine.nodeAnnotations. Worker labels are UNIFIED off kubelet --node-labels (the
+# old path is fully removed). Worker certSANs are node-scoped (own hostname/IP), NOT
+# the apiserver SAN set.
+# -------------------------------------------------------------------------------
+run "per_node_labels_and_annotations" {
+  command = plan
+
+  variables {
+    control_planes = {
+      "cp-1" = {
+        ip          = "192.168.30.11"
+        labels      = { "hardware.example.com/cpu" = "n100" }
+        annotations = { "example.com/rack" = "r1" }
+      }
+    }
+    workers = {
+      "worker-1" = {
+        ip          = "192.168.30.21"
+        labels      = { "hardware.example.com/cpu" = "n305", "workload" = "general" }
+        annotations = { "example.com/rack" = "r2" }
+      }
+    }
+  }
+
+  # CP per-node labels/annotations render under Talos-native machine.nodeLabels / machine.nodeAnnotations.
+  assert {
+    condition     = nonsensitive(output.controlplane_config["cp-1"].machine.nodeLabels["hardware.example.com/cpu"]) == "n100"
+    error_message = "control plane machine.nodeLabels must carry the per-node label."
+  }
+  assert {
+    condition     = nonsensitive(output.controlplane_config["cp-1"].machine.nodeAnnotations["example.com/rack"]) == "r1"
+    error_message = "control plane machine.nodeAnnotations must carry the per-node annotation."
+  }
+
+  # Worker labels render under machine.nodeLabels (Talos-native), NOT kubelet --node-labels.
+  assert {
+    condition     = nonsensitive(output.worker_config["worker-1"].machine.nodeLabels["hardware.example.com/cpu"]) == "n305"
+    error_message = "worker machine.nodeLabels must carry the per-node label."
+  }
+  assert {
+    condition     = nonsensitive(output.worker_config["worker-1"].machine.nodeAnnotations["example.com/rack"]) == "r2"
+    error_message = "worker machine.nodeAnnotations must carry the per-node annotation."
+  }
+
+  # The kubelet --node-labels path is GONE: not on this worker's kubelet, and nowhere in worker_config.
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.worker_config["worker-1"].machine.kubelet), "node-labels"))
+    error_message = "worker labels must NOT pass through kubelet extraArgs node-labels."
+  }
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.worker_config), "node-labels"))
+    error_message = "no worker config may carry a kubelet node-labels arg (mechanism removed)."
+  }
+
+  # Worker certSANs are present and node-scoped: the worker's own hostname (map key) + IP.
+  assert {
+    condition     = contains(nonsensitive(output.worker_config["worker-1"].machine.certSANs), "worker-1")
+    error_message = "worker machine.certSANs must include the worker's own hostname (map key when unset)."
+  }
+  assert {
+    condition     = contains(nonsensitive(output.worker_config["worker-1"].machine.certSANs), "192.168.30.21")
+    error_message = "worker machine.certSANs must include the worker's own IP."
+  }
+
+  # Node-scoped: the worker cert must NOT carry apiserver identities or the VIP.
+  assert {
+    condition     = !contains(nonsensitive(output.worker_config["worker-1"].machine.certSANs), "kubernetes.default.svc")
+    error_message = "worker machine.certSANs must NOT carry the apiserver SAN kubernetes.default.svc (node-scoped)."
+  }
+  assert {
+    condition     = !contains(nonsensitive(output.worker_config["worker-1"].machine.certSANs), "192.168.30.10")
+    error_message = "worker machine.certSANs must NOT carry the control-plane VIP (node-scoped)."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# No labels/annotations set: nodeLabels / nodeAnnotations are absent on both roles
+# (clean render via the non-empty guard).
+# -------------------------------------------------------------------------------
+run "labels_annotations_absent_when_unset" {
+  command = plan
+
+  variables {
+    control_planes = { "cp-1" = { ip = "192.168.30.11" } }
+    workers        = { "worker-1" = { ip = "192.168.30.21" } }
+  }
+
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.controlplane_config["cp-1"].machine), "nodeLabels"))
+    error_message = "control plane machine must omit nodeLabels when none are set."
+  }
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.controlplane_config["cp-1"].machine), "nodeAnnotations"))
+    error_message = "control plane machine must omit nodeAnnotations when none are set."
+  }
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.worker_config["worker-1"].machine), "nodeLabels"))
+    error_message = "worker machine must omit nodeLabels when none are set."
+  }
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.worker_config["worker-1"].machine), "nodeAnnotations"))
+    error_message = "worker machine must omit nodeAnnotations when none are set."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# api_endpoint_host set: the DNS name becomes the cluster endpoint and is auto-added
+# to every cert SAN set, while bootstrap/kubeconfig/health KEEP targeting real CP IPs
+# and the VIP stays an IP.
+# -------------------------------------------------------------------------------
+run "api_endpoint_host_dns" {
+  command = plan
+
+  variables {
+    api_endpoint_host = "api.cluster.example.com"
+    control_planes = {
+      "cp-1" = { ip = "192.168.30.11" }
+      "cp-2" = { ip = "192.168.30.12" }
+      "cp-3" = { ip = "192.168.30.13" }
+    }
+    workers = {
+      "worker-1" = { ip = "192.168.30.21" }
+    }
+  }
+
+  # Endpoint uses the DNS host, not the VIP IP.
+  assert {
+    condition     = output.api_endpoint == "https://api.cluster.example.com:6443"
+    error_message = "api_endpoint must use the DNS host when api_endpoint_host is set."
+  }
+
+  # Host auto-added to the CP machine certSANs, the apiServer certSANs, and the worker node-scoped SANs.
+  assert {
+    condition     = contains(nonsensitive(output.controlplane_config["cp-1"].machine.certSANs), "api.cluster.example.com")
+    error_message = "api_endpoint_host must appear in the control-plane machine.certSANs."
+  }
+  assert {
+    condition     = contains(nonsensitive(output.controlplane_config["cp-1"].cluster.apiServer.certSANs), "api.cluster.example.com")
+    error_message = "api_endpoint_host must appear in the apiServer certSANs."
+  }
+  assert {
+    condition     = contains(nonsensitive(output.worker_config["worker-1"].machine.certSANs), "api.cluster.example.com")
+    error_message = "api_endpoint_host must appear in the worker node-scoped certSANs."
+  }
+
+  # The VIP stays an IP, still wired into the control-plane interface.
+  assert {
+    condition     = output.control_plane_vip == "192.168.30.10"
+    error_message = "control_plane_vip must remain an IP when a DNS endpoint is layered."
+  }
+  assert {
+    condition     = nonsensitive(output.controlplane_config["cp-1"].machine.network.interfaces[0].vip.ip) == "192.168.30.10"
+    error_message = "VIP must remain wired as an IP on the control-plane interface."
+  }
+
+  # CP-IP targeting unchanged: bootstrap, kubeconfig and health hit real CP IPs, never the host.
+  assert {
+    condition     = output.bootstrap_endpoint_ip == "192.168.30.11"
+    error_message = "bootstrap target must remain a real CP IP even with a DNS endpoint."
+  }
+  assert {
+    condition     = talos_machine_bootstrap.this.node == "192.168.30.11" && talos_machine_bootstrap.this.endpoint == "192.168.30.11"
+    error_message = "bootstrap node/endpoint must be a real CP IP, not the DNS endpoint host."
+  }
+  assert {
+    condition     = talos_cluster_kubeconfig.this.node == "192.168.30.11" && talos_cluster_kubeconfig.this.endpoint == "192.168.30.11"
+    error_message = "kubeconfig node/endpoint must be a real CP IP, not the DNS endpoint host."
+  }
+  assert {
+    condition     = !contains(data.talos_cluster_health.this[0].endpoints, "api.cluster.example.com")
+    error_message = "health-check endpoints must be real CP IPs, not the DNS endpoint host."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# api_endpoint_host null (default): the endpoint is the VIP IP and no DNS host leaks
+# into the cert SANs.
+# -------------------------------------------------------------------------------
+run "api_endpoint_host_null_uses_vip" {
+  command = plan
+
+  variables {
+    control_planes = { "cp-1" = { ip = "192.168.30.11" } }
+    workers        = { "worker-1" = { ip = "192.168.30.21" } }
+  }
+
+  assert {
+    condition     = output.api_endpoint == "https://192.168.30.10:6443"
+    error_message = "api_endpoint must be the VIP IP when api_endpoint_host is null."
+  }
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.controlplane_config["cp-1"].machine.certSANs), "example.com"))
+    error_message = "no DNS host may appear in the control-plane cert SANs when api_endpoint_host is null."
+  }
+  assert {
+    condition     = !nonsensitive(strcontains(yamlencode(output.worker_config["worker-1"].machine.certSANs), "example.com"))
+    error_message = "no DNS host may appear in the worker cert SANs when api_endpoint_host is null."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# api_endpoint_host validation (Codex W3): a URL scheme, a host:port, and the empty
+# string are all REJECTED as non-RFC-1123 hostnames.
+# -------------------------------------------------------------------------------
+run "rejects_api_endpoint_host_with_scheme" {
+  command = plan
+
+  variables {
+    control_planes    = { "cp-1" = { ip = "192.168.30.11" } }
+    api_endpoint_host = "https://api.example.com"
+  }
+
+  expect_failures = [var.api_endpoint_host]
+}
+
+run "rejects_api_endpoint_host_with_port" {
+  command = plan
+
+  variables {
+    control_planes    = { "cp-1" = { ip = "192.168.30.11" } }
+    api_endpoint_host = "api.example.com:6443"
+  }
+
+  expect_failures = [var.api_endpoint_host]
+}
+
+run "rejects_api_endpoint_host_empty" {
+  command = plan
+
+  variables {
+    control_planes    = { "cp-1" = { ip = "192.168.30.11" } }
+    api_endpoint_host = ""
+  }
+
+  expect_failures = [var.api_endpoint_host]
+}

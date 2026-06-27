@@ -61,6 +61,8 @@ variable "control_planes" {
       - install_disk   (optional) target disk override; falls back to var.install_disk.
       - hostname       (optional) node hostname; falls back to the map key.
       - interface      (optional) NIC that hosts the VIP on this node; falls back to var.vip_interface.
+      - labels         (optional) Kubernetes node labels via Talos machine.nodeLabels (reconciled day-2).
+      - annotations    (optional) Kubernetes node annotations via Talos machine.nodeAnnotations (reconciled day-2).
       - config_patches (optional) extra Talos YAML config patches applied last (highest precedence).
 
     Count MUST be 1, 3, or 5 (etcd quorum). All control planes MUST share one L2 subnet.
@@ -77,6 +79,8 @@ variable "control_planes" {
     install_disk   = optional(string)
     hostname       = optional(string)
     interface      = optional(string)
+    labels         = optional(map(string), {})
+    annotations    = optional(map(string), {})
     config_patches = optional(list(string), [])
   }))
 
@@ -111,7 +115,8 @@ variable "workers" {
       - ip             (required) stable management IP.
       - install_disk   (optional) target disk override; falls back to var.install_disk.
       - hostname       (optional) node hostname; falls back to the map key.
-      - labels         (optional) node labels applied via kubelet --node-labels.
+      - labels         (optional) Kubernetes node labels via Talos machine.nodeLabels (reconciled day-2).
+      - annotations    (optional) Kubernetes node annotations via Talos machine.nodeAnnotations (reconciled day-2).
       - taints         (optional) register-with taints (key/value/effect).
       - config_patches (optional) extra Talos YAML config patches applied last.
 
@@ -126,6 +131,7 @@ variable "workers" {
     install_disk = optional(string)
     hostname     = optional(string)
     labels       = optional(map(string), {})
+    annotations  = optional(map(string), {})
     taints = optional(list(object({
       key    = string
       value  = optional(string, "")
@@ -199,6 +205,33 @@ variable "vip_interface_dhcp" {
   default     = true
 }
 
+variable "api_endpoint_host" {
+  description = <<-EOT
+    Optional DNS hostname for the Kubernetes API endpoint. When set, the endpoint baked
+    into every machine config (cluster.controlPlane.endpoint) AND the generated kubeconfig
+    becomes https://<api_endpoint_host>:6443 instead of the VIP IP, and the host is
+    auto-added to the certificate SANs (control-plane machine.certSANs + apiServer.certSANs,
+    and each worker's node-scoped machine.certSANs).
+
+    It MUST resolve (DNS) to control_plane_vip - the VIP itself stays an IP, because the
+    Talos native Layer-2 VIP requires vip.ip. If this name fails to resolve at runtime, all
+    client/node API access via the endpoint is blocked until DNS recovers.
+
+    Must be a bare RFC 1123 DNS hostname: no scheme (https://), no port (:6443), no path,
+    and not empty. Leave null (default) to use the VIP IP directly as the endpoint.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    # Skip when null (|| short-circuits, so lower() is never called on null). Otherwise
+    # require a bare RFC 1123 hostname; the regex inherently rejects ':' (port), '/'
+    # (scheme/path), and the empty string (the first class needs >= 1 char).
+    condition     = var.api_endpoint_host == null || can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", lower(var.api_endpoint_host)))
+    error_message = "api_endpoint_host must be a bare RFC 1123 DNS hostname (e.g. 'api.cluster.example.com'): no scheme, no ':port', no path, and not empty."
+  }
+}
+
 # -------------------------------------------------------------------------------
 # 4. CLUSTER NETWORKING
 # -------------------------------------------------------------------------------
@@ -237,7 +270,7 @@ variable "cluster_domain" {
 }
 
 variable "cert_sans" {
-  description = "Additional certificate SANs (the VIP, all CP IPs, the endpoint host, and standard kubernetes names are added automatically)."
+  description = "Additional certificate SANs added to the control-plane machine.certSANs and apiServer.certSANs (and each worker's node-scoped machine.certSANs). The VIP, all control-plane IPs, api_endpoint_host (when set), and the standard kubernetes.* names are added automatically. Use this to reach the API by an extra hostname/IP."
   type        = list(string)
   default     = []
 }

@@ -53,6 +53,7 @@ data "talos_machine_configuration" "control_plane" {
 
   config_patches = concat(
     [yamlencode(local.controlplane_config[each.key])],
+    local.cp_hostname_patches[each.key],
     local.inline_manifests_patches,
     local.talos_api_access_patches,
     local.controlplane_extra_patches[each.key],
@@ -77,6 +78,7 @@ data "talos_machine_configuration" "worker" {
 
   config_patches = concat(
     [yamlencode(local.worker_config[each.key])],
+    local.worker_hostname_patches[each.key],
     local.worker_extra_patches[each.key],
   )
 
