@@ -313,4 +313,44 @@ locals {
       }
     })
   ] : []
+
+  # ---------------------------------------------------------------------------
+  # Talos CCM scoped to node-csr-approval (kubelet serving-cert approval).
+  # Optional; CONTROL-PLANE machine-config feature + helm_release AFTER Cilium.
+  # ---------------------------------------------------------------------------
+  talos_ccm_csr_approver_enabled = var.talos_ccm_csr_approver.enabled
+
+  # CONTROL-PLANE-ONLY patch: open the Talos API to kube-system pods at os:reader so
+  # the CCM can validate node CSRs. Closed by default (only when enabled). Merges
+  # additively with machine.features.kubePrism from the base control-plane config.
+  talos_api_access_patches = local.talos_ccm_csr_approver_enabled ? [
+    yamlencode({
+      machine = {
+        features = {
+          kubernetesTalosAPIAccess = {
+            enabled                     = true
+            allowedRoles                = ["os:reader"]
+            allowedKubernetesNamespaces = ["kube-system"]
+          }
+        }
+      }
+    })
+  ] : []
+
+  talos_ccm_csr_approver_default_values = {
+    enabledControllers = ["node-csr-approval"]
+    replicaCount       = var.talos_ccm_csr_approver.replicas # chart key is replicaCount
+  }
+
+  # enabledControllers + replicaCount re-applied LAST (safety lock): a values blob must
+  # never re-enable cloud-node / node-ipam, nor shadow the validated replica count.
+  # Mirrors cilium_merged_values re-locking. (values.extraArgs and values.enabledControllers
+  # are also rejected by variable validation - this merge is defense in depth.)
+  talos_ccm_csr_approver_merged_values = merge(
+    merge(local.talos_ccm_csr_approver_default_values, var.talos_ccm_csr_approver.values),
+    {
+      enabledControllers = ["node-csr-approval"]
+      replicaCount       = var.talos_ccm_csr_approver.replicas
+    },
+  )
 }

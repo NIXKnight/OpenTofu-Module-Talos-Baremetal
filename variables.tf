@@ -296,6 +296,11 @@ variable "kubelet_extra_args" {
   description = "Extra kubelet flags applied to all nodes."
   type        = map(string)
   default     = {}
+
+  validation {
+    condition     = lookup(var.kubelet_extra_args, "cloud-provider", "") != "external"
+    error_message = "kubelet cloud-provider must not be 'external': this module runs no cloud-node controller, so external kubelets would keep a permanent node.cloudprovider.kubernetes.io/uninitialized taint with nothing to clear it."
+  }
 }
 
 variable "sysctls" {
@@ -504,5 +509,73 @@ variable "disk_encryption" {
       try(var.disk_encryption.kms_endpoint, null) != null
     )
     error_message = "disk_encryption.kms_endpoint is required when disk_encryption.key_provider is \"kms\"."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# 9. OPTIONAL KUBELET SERVING-CERT APPROVAL (Talos CCM, node-csr-approval only)
+# -------------------------------------------------------------------------------
+
+variable "talos_ccm_csr_approver" {
+  description = <<-EOT
+    Optional: install the Talos cloud-controller-manager scoped to ONLY the
+    node-csr-approval controller (no cloud-node, cloud-node-lifecycle, or node-ipam).
+    Disabled by default. It approves kubernetes.io/kubelet-serving CSRs by validating
+    them against Talos node metadata (mapped by node name), so kubelets that request a
+    serving cert (kubelet_extra_args = { "rotate-server-certificates" = "true" }) get a
+    CA-signed cert and metrics-server can drop --kubelet-insecure-tls.
+
+    Enabling this injects machine.features.kubernetesTalosAPIAccess (os:reader,
+    kube-system) into the CONTROL-PLANE machine config so the CCM can read the Talos
+    API - a control-plane config change that re-applies on toggle. The chart creates a
+    talos.dev ServiceAccount; Talos provisions the os:reader talosconfig secret it mounts.
+
+    SAFETY: this scoped install does NOT run cloud-node, so it does NOT clear the
+    node.cloudprovider.kubernetes.io/uninitialized taint. The module rejects external
+    kubelets (var.kubelet_extra_args cloud-provider=external); do NOT set
+    externalCloudProvider either. Re-enabling cloud-node would be harmless ONLY while
+    kubelets stay non-external (which the module enforces).
+
+    Controller scope is enforced two ways: the `enabledControllers` values key is locked to
+    ["node-csr-approval"], AND validation rejects a non-conforming `values.enabledControllers`
+    or a `--controllers` flag in `values.extraArgs` (the chart passes extraArgs verbatim as
+    container args). `values` is otherwise a passthrough (type any) for
+    nodeSelector/tolerations/resources/pod or serviceAccount annotations/etc.
+
+    Example:
+      talos_ccm_csr_approver = { enabled = true }
+  EOT
+  type = object({
+    enabled       = optional(bool, false)
+    chart_version = optional(string, "0.5.4")
+    replicas      = optional(number, 1)
+    helm_timeout  = optional(number, 600)
+    atomic        = optional(bool, true)
+    values        = optional(any, {})
+  })
+  default = {}
+
+  validation {
+    condition     = var.talos_ccm_csr_approver.replicas >= 1
+    error_message = "talos_ccm_csr_approver.replicas must be >= 1."
+  }
+
+  validation {
+    condition     = var.talos_ccm_csr_approver.helm_timeout > 0
+    error_message = "talos_ccm_csr_approver.helm_timeout must be greater than 0."
+  }
+
+  # Reject a non-conforming values.enabledControllers override so it errors loudly
+  # instead of being silently swallowed by the merge lock.
+  validation {
+    condition     = try(var.talos_ccm_csr_approver.values.enabledControllers, ["node-csr-approval"]) == ["node-csr-approval"]
+    error_message = "talos_ccm_csr_approver.values.enabledControllers must be [\"node-csr-approval\"] or omitted; the module enforces node-csr-approval only."
+  }
+
+  # The chart passes values.extraArgs verbatim as container args, which would bypass the
+  # enabledControllers lock. Reject any --controllers there.
+  validation {
+    condition     = !contains([for a in try(var.talos_ccm_csr_approver.values.extraArgs, []) : startswith(trimspace(a), "--controllers")], true)
+    error_message = "talos_ccm_csr_approver.values.extraArgs must not set --controllers; the module locks controllers to node-csr-approval."
   }
 }

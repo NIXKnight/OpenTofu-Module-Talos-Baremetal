@@ -190,6 +190,12 @@ Default versions in the examples: Talos `v1.13.5`, Kubernetes `1.36.2`, Cilium c
 
 > **kube-proxy is OFF by default.** The module hardcodes `cluster.proxy.disabled = true` and `cluster.network.cni.name = "none"` on the control plane (cluster-wide). When `deploy_cilium = true`, Cilium takes over with `kubeProxyReplacement = true` reaching the API via KubePrism (`localhost:7445`). **When `deploy_cilium = false` (BYO CNI), kube-proxy stays disabled** — your replacement CNI MUST provide service load-balancing itself (e.g. Cilium/Calico kube-proxy replacement), or you must re-enable kube-proxy via a `config_patch` (`cluster.proxy.disabled = false`). The module never ships kube-proxy on any default path.
 
+### Kubelet serving certificates
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `talos_ccm_csr_approver` | `object` | `{ enabled = false }` | Optional Talos CCM scoped to the `node-csr-approval` controller, issuing CA-signed kubelet serving certs (drops `--kubelet-insecure-tls`). Fields: `enabled`, `chart_version` (`0.5.4`), `replicas` (`1`), `helm_timeout` (`600`), `atomic` (`true`), `values`. **Pair with `kubelet_extra_args = { "rotate-server-certificates" = "true" }`.** See [Kubelet serving certificates](#kubelet-serving-certificates-1). |
+
 ### Operations / security
 
 | Name | Type | Default | Description |
@@ -230,6 +236,65 @@ The module renders this as `machine.systemDiskEncryption.{state,ephemeral}` with
 
 ---
 
+## Kubelet serving certificates
+
+*Talos CCM scoped to the `node-csr-approval` controller — nothing else.*
+
+By default kubelet uses a **self-signed** serving certificate, so `metrics-server`, `kubectl top`, and any kubelet TLS scraper need `--kubelet-insecure-tls`. To get **CA-signed** kubelet serving certs cluster-wide, set **two independent knobs**:
+
+**1. Tell kubelets to request a serving cert** (operator-set, explicit — applies to every node):
+
+```hcl
+kubelet_extra_args = {
+  "rotate-server-certificates" = "true"
+}
+```
+
+Without this, kubelets keep self-signed certs and submit no serving CSRs. The module does **not** set it automatically: it mutates the machine config and triggers a config-apply/reboot, so it stays a deliberate operator choice.
+
+**2. Approve the `kubernetes.io/kubelet-serving` CSRs:**
+
+```hcl
+talos_ccm_csr_approver = {
+  enabled = true
+}
+```
+
+This installs the Talos cloud-controller-manager **scoped to only the `node-csr-approval` controller**. It validates each serving CSR against Talos node metadata (matched by node **name**) and approves it; kube-controller-manager refuses to auto-approve serving CSRs, so an approver is mandatory.
+
+With both set: kubelets submit serving CSRs → the approver signs them → `metrics-server` runs with **no** `--kubelet-insecure-tls`.
+
+### Safety — do NOT make kubelets external
+
+The scoped install runs **only** `node-csr-approval`; it does **not** run `cloud-node`, so it does not clear the `node.cloudprovider.kubernetes.io/uninitialized` taint. The module **rejects** external kubelets (a validation fails if `kubelet_extra_args` sets `cloud-provider = "external"`), and you must **not** set `cluster.externalCloudProvider` either — external kubelets would be tainted `uninitialized` with nothing to clear it, leaving nodes unschedulable. Re-enabling `cloud-node` would be harmless **only** while kubelets stay non-external (which the module enforces).
+
+Controller scope is enforced two ways: the `enabledControllers` values key is **locked** to `["node-csr-approval"]`, **and** validation rejects a non-conforming `values.enabledControllers` or a `--controllers` flag in `values.extraArgs` (the chart passes `extraArgs` verbatim as container args, which would otherwise bypass the lock). This scoped CCM is **mutually exclusive** with running a full Talos CCM that includes the `cloud-node` controller — run one or the other, not both.
+
+### Privilege surface
+
+Enabling the approver injects `machine.features.kubernetesTalosAPIAccess` into the **control-plane** machine config (a config-apply on toggle). Understand the real blast radius before enabling: once the feature is on, **any** workload or ServiceAccount able to create a `serviceaccounts.talos.dev` object in `kube-system` can self-mint an `os:reader` talosconfig to the control-plane host Talos API. That grants read access to node/COSI resources (node and cluster metadata, `dmesg`, `talosctl read` of host files) and — depending on the method grants of `os:reader` — the **machine configuration**, which embeds the cluster CA and credentials. The scope is read-only (`os:reader`) and `kube-system`-only, but treat `kube-system` as a trusted namespace and keep tenant/untrusted workloads out of it. Closed by default — nothing is opened unless `enabled = true`.
+
+> **Residual chart privilege.** The CCM ServiceAccount's chart ClusterRole grants `nodes` update/patch, `nodes/status` patch, `serviceaccounts` create, and `serviceaccounts/token` create **cluster-wide**, even though only `node-csr-approval` actually runs. This cannot be trimmed without forking the chart — it is a residual privilege of installing the upstream chart.
+
+### Inputs (`talos_ccm_csr_approver`)
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | `bool` | `false` | Install the scoped Talos CCM. |
+| `chart_version` | `string` | `0.5.4` | `talos-cloud-controller-manager` OCI chart version. |
+| `replicas` | `number` | `1` | CCM replica count (leader-elected; raise for HA). |
+| `helm_timeout` | `number` | `600` | Helm release timeout (seconds). Raised to leave margin for first-enable secret-mint lag. |
+| `atomic` | `bool` | `true` | Roll back on a failed install/upgrade. |
+| `values` | `any` | `{}` | Helm values passthrough (`nodeSelector` / `tolerations` / `resources` / pod or serviceAccount annotations). `enabledControllers` is locked to `["node-csr-approval"]`. |
+
+> **Node labels / annotations: none required.** `node-csr-approval` maps the Kubernetes Node to the Talos node purely **by node name** — no `providerID`, label, or annotation is used. Cloud-CCM concerns from cloud modules (`providerID`, `node.kubernetes.io/exclude-from-external-load-balancers`, instance metadata) do **not** apply to baremetal and are intentionally not set. Per-node user labels remain available via `workers[*].labels`.
+
+> **First enable / day-2 toggle.** The first time you set `enabled = true`, the `talos.dev` secret Talos mints for the CCM can lag briefly behind the helm install. If the release times out on that first apply, **re-apply** — it self-heals (`kubernetesTalosAPIAccess` is a runtime feature, no reboot). `helm_timeout` defaults to `600` to leave margin.
+
+> **Optional digest pin.** The module pins the chart by semver (`chart_version`, default `0.5.4`) for readability. For stronger supply-chain provenance, verify and pin the chart digest out of band — e.g. `helm pull oci://ghcr.io/siderolabs/charts/talos-cloud-controller-manager --version 0.5.4` and record the `@sha256:` digest, or wrap the module against a digest-qualified OCI reference.
+
+---
+
 ## Outputs
 
 | Name | Sensitive | Description |
@@ -249,6 +314,8 @@ The module renders this as `machine.systemDiskEncryption.{state,ephemeral}` with
 | `node_count` | | Control planes + workers. |
 | `control_plane_count` | | Control plane count. |
 | `cilium_deployed` | | Whether Cilium is installed by this module (`helm_release`). |
+| `talos_ccm_csr_approver_deployed` | | Whether the scoped Talos CCM (node-csr-approval) is installed. |
+| `talos_ccm_csr_approver_values` | | Effective merged Helm values for the Talos CCM release. |
 
 ---
 

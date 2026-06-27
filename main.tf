@@ -54,6 +54,7 @@ data "talos_machine_configuration" "control_plane" {
   config_patches = concat(
     [yamlencode(local.controlplane_config[each.key])],
     local.inline_manifests_patches,
+    local.talos_api_access_patches,
     local.controlplane_extra_patches[each.key],
   )
 
@@ -168,9 +169,10 @@ resource "talos_machine_bootstrap" "this" {
 # The helm provider must reach the live API to install Cilium, but bootstrap can
 # return before the apiserver is fully serving. Poll https://<cp>:6443/version on
 # the first real CP IP until it responds. insecure: the API serving cert is not in
-# the runner trust store. Only needed when this module installs Cilium.
+# the runner trust store. Needed when this module installs Cilium OR the Talos CCM CSR
+# approver (the helm provider must reach the live API for either).
 data "http" "api_up" {
-  count = local.cilium_enabled ? 1 : 0
+  count = (local.cilium_enabled || local.talos_ccm_csr_approver_enabled) ? 1 : 0
 
   url      = "https://${local.bootstrap_ip}:6443/version"
   insecure = true
@@ -251,5 +253,41 @@ data "talos_cluster_health" "this" {
   depends_on = [
     helm_release.cilium,
     talos_machine_configuration_apply.worker,
+  ]
+}
+
+# -------------------------------------------------------------------------------
+# TALOS CCM (node-csr-approval ONLY) - optional, live Helm install AFTER Cilium
+# -------------------------------------------------------------------------------
+# Scoped to the node-csr-approval controller: approves kubelet serving-cert CSRs by
+# validating them against Talos node metadata (mapped by node name, via the os:reader
+# talosconfig from machine.features.kubernetesTalosAPIAccess). Retires metrics-server
+# --kubelet-insecure-tls. NOT on the bootstrap/Cilium path. cloud-node is disabled, so
+# kubelets must remain non-external (this module never makes them external).
+#
+# The chart default is daemonSet.enabled=false -> a Deployment in the POD NETWORK (not
+# hostNetwork), so the pod needs the CNI for its IP, ClusterIP apiserver access, and
+# Talos-API reachability. The post-Cilium gate is therefore MANDATORY, not cosmetic.
+# data.http.api_up is widened to also count when this approver is enabled, so the
+# API-readiness edge is real even when cilium_install_method = "none".
+resource "helm_release" "talos_ccm_csr_approver" {
+  count = local.talos_ccm_csr_approver_enabled ? 1 : 0
+
+  name             = "talos-cloud-controller-manager"
+  namespace        = "kube-system"
+  create_namespace = false
+  repository       = "oci://ghcr.io/siderolabs/charts"
+  chart            = "talos-cloud-controller-manager"
+  version          = var.talos_ccm_csr_approver.chart_version
+  values           = [yamlencode(local.talos_ccm_csr_approver_merged_values)]
+  wait             = true
+  timeout          = var.talos_ccm_csr_approver.helm_timeout
+  atomic           = var.talos_ccm_csr_approver.atomic
+
+  depends_on = [
+    helm_release.cilium,
+    talos_cluster_kubeconfig.this,
+    data.http.api_up,
+    talos_machine_configuration_apply.control_plane,
   ]
 }

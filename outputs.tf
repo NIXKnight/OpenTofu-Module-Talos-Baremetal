@@ -109,6 +109,19 @@ output "cilium_values" {
   value       = local.cilium_merged_values
 }
 
+output "talos_ccm_csr_approver_deployed" {
+  description = "Whether the Talos CCM (scoped to node-csr-approval only) is installed by this module."
+  value       = local.talos_ccm_csr_approver_enabled
+}
+
+output "talos_ccm_csr_approver_values" {
+  description = "Locked, non-secret subset of the Talos CCM Helm values (enabledControllers, replicaCount). The full merged values - including the user `values` passthrough, which may carry secrets - are sent to the release but deliberately NOT echoed here."
+  value = {
+    enabledControllers = local.talos_ccm_csr_approver_merged_values.enabledControllers
+    replicaCount       = local.talos_ccm_csr_approver_merged_values.replicaCount
+  }
+}
+
 output "labels" {
   description = "Common labels passed to the module (surfaced for downstream tagging/automation)."
   value       = var.labels

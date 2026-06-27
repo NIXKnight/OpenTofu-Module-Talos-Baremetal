@@ -455,3 +455,232 @@ run "single_char_name_and_labels_output" {
     error_message = "labels output must surface the provided labels."
   }
 }
+
+# -------------------------------------------------------------------------------
+# Talos CCM (node-csr-approval only) ENABLED: helm_release present, controllers
+# scoped, and kubernetesTalosAPIAccess injected into the CONTROL-PLANE config only.
+# -------------------------------------------------------------------------------
+run "talos_ccm_csr_approver_enabled" {
+  command = plan
+
+  variables {
+    control_planes         = { "cp-1" = { ip = "192.168.30.11" } }
+    workers                = { "worker-1" = { ip = "192.168.30.21" } }
+    talos_ccm_csr_approver = { enabled = true }
+  }
+
+  assert {
+    condition     = length(helm_release.talos_ccm_csr_approver) == 1
+    error_message = "helm_release.talos_ccm_csr_approver must be planned with count 1 when enabled."
+  }
+
+  assert {
+    condition     = helm_release.talos_ccm_csr_approver[0].chart == "talos-cloud-controller-manager"
+    error_message = "talos_ccm_csr_approver chart must be 'talos-cloud-controller-manager'."
+  }
+
+  assert {
+    condition     = helm_release.talos_ccm_csr_approver[0].namespace == "kube-system"
+    error_message = "talos_ccm_csr_approver namespace must be kube-system."
+  }
+
+  # Controllers scoped to ONLY node-csr-approval (no cloud-node / node-ipam).
+  assert {
+    condition     = length(output.talos_ccm_csr_approver_values.enabledControllers) == 1 && output.talos_ccm_csr_approver_values.enabledControllers[0] == "node-csr-approval"
+    error_message = "enabledControllers must be scoped to ['node-csr-approval'] only."
+  }
+
+  assert {
+    condition     = output.talos_ccm_csr_approver_deployed == true
+    error_message = "talos_ccm_csr_approver_deployed must be true when enabled."
+  }
+
+  # Talos API access feature is injected into the CONTROL-PLANE machine config.
+  assert {
+    condition     = strcontains(join("\n", data.talos_machine_configuration.control_plane["cp-1"].config_patches), "kubernetesTalosAPIAccess")
+    error_message = "control-plane config must carry kubernetesTalosAPIAccess when enabled."
+  }
+
+  # CP-only: workers must NOT receive the Talos API access feature.
+  assert {
+    condition     = !strcontains(join("\n", data.talos_machine_configuration.worker["worker-1"].config_patches), "kubernetesTalosAPIAccess")
+    error_message = "worker config must NOT carry kubernetesTalosAPIAccess (control-plane-only feature)."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# Talos CCM DISABLED by default: no helm_release, and SECURITY - the Talos API is
+# NOT opened (no kubernetesTalosAPIAccess) when the feature is off.
+# -------------------------------------------------------------------------------
+run "talos_ccm_csr_approver_disabled_by_default" {
+  command = plan
+
+  variables {
+    control_planes = { "cp-1" = { ip = "192.168.30.11" } }
+  }
+
+  assert {
+    condition     = length(helm_release.talos_ccm_csr_approver) == 0
+    error_message = "helm_release.talos_ccm_csr_approver must have count 0 by default (opt-in)."
+  }
+
+  assert {
+    condition     = output.talos_ccm_csr_approver_deployed == false
+    error_message = "talos_ccm_csr_approver_deployed must be false by default."
+  }
+
+  assert {
+    condition     = !strcontains(join("\n", data.talos_machine_configuration.control_plane["cp-1"].config_patches), "kubernetesTalosAPIAccess")
+    error_message = "kubernetesTalosAPIAccess must be absent from the machine config when the approver is disabled."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# replicas < 1 MUST be rejected.
+# -------------------------------------------------------------------------------
+run "rejects_talos_ccm_zero_replicas" {
+  command = plan
+
+  variables {
+    control_planes         = { "cp-1" = { ip = "192.168.30.11" } }
+    talos_ccm_csr_approver = { enabled = true, replicas = 0 }
+  }
+
+  expect_failures = [var.talos_ccm_csr_approver]
+}
+
+# -------------------------------------------------------------------------------
+# A non-conforming values.enabledControllers override is REJECTED loudly (not swallowed).
+# -------------------------------------------------------------------------------
+run "rejects_talos_ccm_enabledcontrollers_override" {
+  command = plan
+
+  variables {
+    control_planes = { "cp-1" = { ip = "192.168.30.11" } }
+    talos_ccm_csr_approver = {
+      enabled = true
+      values  = { enabledControllers = ["cloud-node", "node-csr-approval", "node-ipam-controller"] }
+    }
+  }
+
+  expect_failures = [var.talos_ccm_csr_approver]
+}
+
+# -------------------------------------------------------------------------------
+# A --controllers flag smuggled via values.extraArgs is REJECTED (lock side channel).
+# -------------------------------------------------------------------------------
+run "rejects_talos_ccm_extraargs_controllers" {
+  command = plan
+
+  variables {
+    control_planes = { "cp-1" = { ip = "192.168.30.11" } }
+    talos_ccm_csr_approver = {
+      enabled = true
+      values  = { extraArgs = ["--controllers=cloud-node,node-csr-approval"] }
+    }
+  }
+
+  expect_failures = [var.talos_ccm_csr_approver]
+}
+
+# -------------------------------------------------------------------------------
+# DECOUPLED from Cilium: enabled with cilium_install_method = "none" still installs,
+# and data.http.api_up is active (proves the readiness gate widening, fix 2).
+# -------------------------------------------------------------------------------
+run "talos_ccm_method_none_decoupled" {
+  command = plan
+
+  variables {
+    control_planes         = { "cp-1" = { ip = "192.168.30.11" } }
+    cilium_install_method  = "none"
+    talos_ccm_csr_approver = { enabled = true }
+  }
+
+  assert {
+    condition     = length(helm_release.talos_ccm_csr_approver) == 1
+    error_message = "approver must install even when cilium_install_method is 'none'."
+  }
+
+  assert {
+    condition     = length(data.http.api_up) == 1
+    error_message = "data.http.api_up must be active (count 1) when the approver is enabled, even without Cilium."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# Typed replicas maps through to the chart replicaCount.
+# -------------------------------------------------------------------------------
+run "talos_ccm_replicas_passthrough" {
+  command = plan
+
+  variables {
+    control_planes         = { "cp-1" = { ip = "192.168.30.11" } }
+    talos_ccm_csr_approver = { enabled = true, replicas = 3 }
+  }
+
+  assert {
+    condition     = output.talos_ccm_csr_approver_values.replicaCount == 3
+    error_message = "replicaCount must reflect the typed replicas (3)."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# A values.replicaCount override is RE-LOCKED: the validated var.replicas wins, so 0
+# cannot silently disable the approver while _deployed reports true (fix 4).
+# -------------------------------------------------------------------------------
+run "talos_ccm_replicacount_relocked" {
+  command = plan
+
+  variables {
+    control_planes = { "cp-1" = { ip = "192.168.30.11" } }
+    talos_ccm_csr_approver = {
+      enabled = true
+      values  = { replicaCount = 0 }
+    }
+  }
+
+  assert {
+    condition     = output.talos_ccm_csr_approver_values.replicaCount == 1
+    error_message = "replicaCount must stay from var.replicas (default 1), not the values override (0)."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# A legitimate values passthrough (nodeSelector) survives into the rendered release
+# values, while enabledControllers stays locked (merge does not clobber legit input).
+# -------------------------------------------------------------------------------
+run "talos_ccm_values_passthrough_survives" {
+  command = plan
+
+  variables {
+    control_planes = { "cp-1" = { ip = "192.168.30.11" } }
+    talos_ccm_csr_approver = {
+      enabled = true
+      values  = { nodeSelector = { "node-role.kubernetes.io/control-plane" = "" } }
+    }
+  }
+
+  assert {
+    condition     = strcontains(join("", helm_release.talos_ccm_csr_approver[0].values), "nodeSelector")
+    error_message = "a legitimate values passthrough (nodeSelector) must survive into the release values."
+  }
+
+  assert {
+    condition     = output.talos_ccm_csr_approver_values.enabledControllers[0] == "node-csr-approval"
+    error_message = "enabledControllers must stay locked while a passthrough value is merged."
+  }
+}
+
+# -------------------------------------------------------------------------------
+# External kubelets are REJECTED module-wide (no cloud-node to clear the taint, fix 6).
+# -------------------------------------------------------------------------------
+run "rejects_external_kubelet" {
+  command = plan
+
+  variables {
+    control_planes     = { "cp-1" = { ip = "192.168.30.11" } }
+    kubelet_extra_args = { "cloud-provider" = "external" }
+  }
+
+  expect_failures = [var.kubelet_extra_args]
+}
